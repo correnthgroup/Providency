@@ -75,8 +75,12 @@ def run_launcher() -> None:
                 str(package_dir / "ui.py"),
                 "--server.port",
                 str(settings.ui_port),
+                "--server.address",
+                "127.0.0.1",
                 "--server.headless",
                 "true",
+                "--browser.gatherUsageStats",
+                "false",
             ]
         )
         webbrowser.open(ui_url)
