@@ -4,14 +4,26 @@ from fastapi.testclient import TestClient
 from synthetic_chart import bearish_engulfing_chart
 
 from providency.api import create_app
-from providency.config import Settings
-from providency.vector import CaptureDisposition, CaptureRegion, ChartCapture
+from providency.config import AnalysisConfiguration, Settings
+from providency.context import PriceAnchor
+from providency.vector import (
+    AppliedVectorState,
+    CaptureDisposition,
+    CaptureRegion,
+    ChartCapture,
+    DesiredVectorState,
+    StateSyncResult,
+)
 
 ROOT = Path(__file__).parents[1]
 
 
-def settings(tmp_path: Path) -> Settings:
-    return Settings(data_dir=tmp_path, patterns_dir=ROOT / "patterns")
+def settings(tmp_path: Path, configuration: AnalysisConfiguration | None = None) -> Settings:
+    return Settings(
+        data_dir=tmp_path,
+        patterns_dir=ROOT / "patterns",
+        analysis_configuration=configuration,
+    )
 
 
 class FakeVectorAdapter:
@@ -26,7 +38,8 @@ class FakeVectorAdapter:
         return {"state": "WAITING_FOR_MANUAL_LOGIN", "url": "https://vector.example/app"}
 
     async def capture_primary_chart(self) -> ChartCapture:
-        self.capture_path.write_bytes(b"webp")
+        if not self.capture_path.exists():
+            self.capture_path.write_bytes(b"webp")
         return ChartCapture(
             disposition=CaptureDisposition.USABLE,
             captured_at="2026-09-05T12:30:00+00:00",
@@ -36,6 +49,36 @@ class FakeVectorAdapter:
             path=self.capture_path,
             sha256="a" * 64,
         )
+
+    async def sync_analysis_state(self, desired: DesiredVectorState) -> StateSyncResult:
+        applied = AppliedVectorState(
+            desired.symbol,
+            desired.timeframe,
+            {period: float(period) for period in desired.moving_average_periods},
+            (),
+            (
+                PriceAnchor(0, 110, "DOM_GEOMETRY"),
+                PriceAnchor(100, 60, "DOM_GEOMETRY"),
+            ),
+        )
+        return StateSyncResult(desired, applied, applied)
+
+    async def capture_primary_context(
+        self, desired: DesiredVectorState, context_timeframe: str
+    ) -> tuple[ChartCapture, ChartCapture, StateSyncResult]:
+        primary = await self.capture_primary_chart()
+        context = await self.capture_primary_chart()
+        applied = AppliedVectorState(
+            desired.symbol,
+            desired.timeframe,
+            {period: float(period) for period in desired.moving_average_periods},
+            (),
+            (
+                PriceAnchor(0, 110, "DOM_GEOMETRY"),
+                PriceAnchor(100, 60, "DOM_GEOMETRY"),
+            ),
+        )
+        return primary, context, StateSyncResult(desired, applied, applied)
 
     async def stop(self) -> None:
         self.stopped = True
@@ -113,3 +156,48 @@ def test_pattern_analysis_api_returns_visual_evidence_and_persists_it(tmp_path: 
         persisted = client.get("/pattern/detections").json()
         assert persisted[0]["screenshot_sha256"] == "b" * 64
         assert persisted[0]["result"] == "MATCH"
+
+
+def test_candidate_api_exposes_complete_auditable_preflight(tmp_path: Path) -> None:
+    configuration = AnalysisConfiguration(
+        symbol="BTC/BRL",
+        primary_timeframe="15min",
+        context_timeframe="1h",
+        short_ma_period=7,
+        long_ma_period=70,
+        quantity=2,
+        tick_size=0.5,
+        tick_value=1.0,
+        stop_buffer_ticks=1,
+        min_rr=2,
+        max_trades=3,
+        max_consecutive_losses=2,
+        max_session_loss=100,
+        support_resistance_tolerance=5,
+    )
+    adapter = FakeVectorAdapter(tmp_path / "capture.webp")
+    bearish_engulfing_chart(adapter.capture_path)
+    app = create_app(settings(tmp_path, configuration), recover=False, vector_adapter=adapter)
+
+    with TestClient(app) as client:
+        client.post("/run")
+        sync = client.post("/vector/sync")
+        assert sync.status_code == 200
+        capture_pair = client.post("/vector/capture-analysis").json()
+        response = client.post(
+            "/candidate/evaluate",
+            json={
+                "analysis_capture_id": capture_pair["analysis_capture_id"],
+                "pattern_detection_id": capture_pair["pattern_detection_id"],
+            },
+        )
+
+        assert response.status_code == 200
+        candidate = response.json()
+        assert candidate["decision"] in {"ALLOWED", "BLOCKED"}
+        assert candidate["entry"] is not None
+        assert candidate["stop"] is not None
+        assert candidate["quantity"] == 2
+        assert candidate["configuration_snapshot"]["version"] == configuration.version
+        assert candidate["applied_state_id"] == capture_pair["applied_state_id"]
+        assert client.get("/candidates").json()[0]["candidate_id"] == candidate["candidate_id"]

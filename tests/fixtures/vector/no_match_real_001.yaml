@@ -6,6 +6,21 @@ symbol: BTC/BRL
 timeframe: 15min
 label: NO_MATCH
 reason: "The final three context closes are not strictly ascending."
+applied_state:
+  source: explicit_dom_text
+  symbol: BTC/BRL
+  timeframe: 15min
+  moving_averages:
+    "7": 410148.00
+    "70": 410911.94
+price_scale:
+  source: manually_verified_visible_axis_labels
+  tick_size: 0.01
+  anchors:
+    - {y: 27.0, price: 420942.00, source: DOM_GEOMETRY}
+    - {y: 536.0, price: 394242.00, source: DOM_GEOMETRY}
+  probes:
+    - {y: 281.5, price: 407592.00}
 sanitization:
   method: exact_pixel_crop
   source_region: {x: 54, y: 128, width: 1661, height: 615}

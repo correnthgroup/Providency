@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "providency"
-version = "0.3.0"
+version = "0.4.0"
 description = "Local supervised market-observation runtime"
 readme = "README.md"
 requires-python = ">=3.12,<3.13"

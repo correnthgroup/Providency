@@ -8,14 +8,18 @@ import pytest
 from PIL import Image
 
 from providency.config import Settings
+from providency.context import PriceAnchor
 from providency.vector import (
+    AppliedVectorState,
     CaptureDisposition,
     CaptureIssue,
     ChartCaptureService,
+    DesiredVectorState,
     PlaywrightPageProbe,
     VectorAdapter,
     VectorAdapterError,
     VectorSelectors,
+    VectorStateSynchronizer,
 )
 
 
@@ -204,3 +208,94 @@ def test_settings_keep_vector_profile_and_captures_under_data_dir(tmp_path: Path
 
     assert settings.vector_profile_dir == tmp_path / "vector-profile"
     assert settings.capture_dir == tmp_path / "captures"
+
+
+class FakeControlProbe:
+    def __init__(self, symbol: str, timeframe: str, moving_averages: dict[int, float]) -> None:
+        self.symbol = symbol
+        self.timeframe = timeframe
+        self.moving_averages = moving_averages
+        self.actions: list[tuple[str, str]] = []
+
+    async def read_symbol(self) -> str | None:
+        return self.symbol
+
+    async def read_timeframe(self) -> str | None:
+        return self.timeframe
+
+    async def read_moving_averages(self) -> dict[int, float]:
+        return dict(self.moving_averages)
+
+    async def read_price_anchors(self) -> tuple[PriceAnchor, ...]:
+        return ()
+
+    async def set_symbol(self, value: str) -> None:
+        self.actions.append(("symbol", value))
+        self.symbol = value
+
+    async def set_timeframe(self, value: str) -> None:
+        self.actions.append(("timeframe", value))
+        self.timeframe = value
+
+    async def set_moving_average(self, period: int, enabled: bool) -> None:
+        self.actions.append(("ma", f"{period}:{enabled}"))
+        if enabled:
+            self.moving_averages.setdefault(period, 1.0)
+        else:
+            self.moving_averages.pop(period, None)
+
+
+@pytest.mark.asyncio
+async def test_state_sync_uses_pre_action_post_and_reports_applied_values() -> None:
+    probe = FakeControlProbe("ETH/BRL", "5min", {})
+    desired = DesiredVectorState(
+        symbol="BTC/BRL", timeframe="15min", moving_average_periods=(7, 70)
+    )
+
+    result = await VectorStateSynchronizer(probe).sync(desired)
+
+    assert result.matches_desired
+    assert result.pre.symbol == "ETH/BRL"
+    assert result.post == AppliedVectorState(
+        symbol="BTC/BRL",
+        timeframe="15min",
+        moving_averages={7: 1.0, 70: 1.0},
+        missing_fields=(),
+    )
+    assert probe.actions == [
+        ("symbol", "BTC/BRL"),
+        ("timeframe", "15min"),
+        ("ma", "7:True"),
+        ("ma", "70:True"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_context_capture_always_restores_primary_timeframe() -> None:
+    probe = FakeControlProbe("BTC/BRL", "15min", {7: 1.0, 70: 2.0})
+    synchronizer = VectorStateSynchronizer(probe)
+    captured: list[str] = []
+
+    async def capture() -> str:
+        captured.append(probe.timeframe)
+        return probe.timeframe
+
+    primary, context, restored = await synchronizer.capture_primary_context(
+        DesiredVectorState("BTC/BRL", "15min", (7, 70)),
+        context_timeframe="1h",
+        capture=capture,
+    )
+
+    assert (primary, context) == ("15min", "1h")
+    assert restored.matches_desired
+    assert probe.timeframe == "15min"
+
+
+@pytest.mark.asyncio
+async def test_missing_applied_state_never_matches_desired() -> None:
+    probe = FakeControlProbe("", "", {})
+    desired = DesiredVectorState("BTC/BRL", "15min", (7,))
+    state = await VectorStateSynchronizer(probe).observe(desired)
+
+    assert not state.matches(desired)
+    assert set(state.missing_fields) == {"symbol", "timeframe", "moving_average:7"}

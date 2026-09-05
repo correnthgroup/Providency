@@ -41,19 +41,24 @@ class PatternAnalysisService:
         self.detector = detector or CandleDetector()
 
     def analyze(self, capture: ChartCapture) -> PatternMatchResult:
+        result, _detection_id = self.analyze_with_id(capture)
+        return result
+
+    def analyze_with_id(
+        self, capture: ChartCapture
+    ) -> tuple[PatternMatchResult, str | None]:
         if (
             capture.disposition is not CaptureDisposition.USABLE
             or capture.path is None
             or capture.sha256 is None
         ):
             issue = capture.issue.value if capture.issue else "capture metadata is incomplete"
-            return self.matcher.no_match(f"Visual analysis blocked: {issue}.")
+            return self.matcher.no_match(f"Visual analysis blocked: {issue}."), None
         try:
             window = self.detector.detect(capture.path)
         except VisionDetectionError as exc:
             result = self.matcher.no_match(str(exc))
-            self._persist(capture, result)
-            return result
+            return result, self._persist(capture, result)
 
         evidence = PatternEvidence(
             screenshot_sha256=capture.sha256,
@@ -76,14 +81,13 @@ class PatternAnalysisService:
             [item.candle.close for item in context],
             evidence=evidence,
         )
-        self._persist(capture, result)
-        return result
+        return result, self._persist(capture, result)
 
-    def _persist(self, capture: ChartCapture, result: PatternMatchResult) -> None:
+    def _persist(self, capture: ChartCapture, result: PatternMatchResult) -> str:
         assert capture.sha256 is not None
         assert capture.path is not None
         session = self.storage.running_session()
-        self.storage.record_pattern_detection(
+        detection_id = self.storage.record_pattern_detection(
             session_id=str(session["id"]) if session else None,
             screenshot_sha256=capture.sha256,
             screenshot_path=str(capture.path),
@@ -107,3 +111,4 @@ class PatternAnalysisService:
                 "reason": result.reason,
             },
         )
+        return detection_id

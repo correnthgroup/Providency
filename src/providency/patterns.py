@@ -139,6 +139,8 @@ class PatternPackage:
     preceding_candles: int
     context_rules: tuple[Rule, ...]
     sequence_rules: tuple[Rule, ...]
+    family: str
+    compatible_context_families: tuple[str, ...]
 
     @classmethod
     def load(cls, path: Path) -> PatternPackage:
@@ -173,6 +175,10 @@ class PatternPackage:
             preceding_candles=preceding_candles,
             context_rules=context_rules,
             sequence_rules=sequence_rules,
+            family=str(root.get("family", "")),
+            compatible_context_families=tuple(
+                str(value) for value in root.get("compatible_context_families", [])
+            ),
         )
 
 

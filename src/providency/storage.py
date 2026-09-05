@@ -50,6 +50,14 @@ class Storage:
                 CREATE UNIQUE INDEX IF NOT EXISTS one_running_session
                     ON sessions(status) WHERE status = 'RUNNING';
 
+                CREATE TABLE IF NOT EXISTS session_risk_state (
+                    session_id TEXT PRIMARY KEY,
+                    trades INTEGER NOT NULL DEFAULT 0 CHECK (trades >= 0),
+                    consecutive_losses INTEGER NOT NULL DEFAULT 0 CHECK (consecutive_losses >= 0),
+                    loss REAL NOT NULL DEFAULT 0 CHECK (loss >= 0),
+                    FOREIGN KEY (session_id) REFERENCES sessions(id)
+                );
+
                 CREATE TABLE IF NOT EXISTS events (
                     id TEXT PRIMARY KEY,
                     session_id TEXT,
@@ -80,6 +88,47 @@ class Storage:
 
                 CREATE INDEX IF NOT EXISTS pattern_detections_created_at
                     ON pattern_detections(created_at DESC);
+
+                CREATE TABLE IF NOT EXISTS configurations (
+                    version TEXT PRIMARY KEY,
+                    created_at TEXT NOT NULL,
+                    desired_json TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS applied_states (
+                    id TEXT PRIMARY KEY,
+                    configuration_version TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    matches_desired INTEGER NOT NULL CHECK (matches_desired IN (0, 1)),
+                    state_json TEXT NOT NULL,
+                    FOREIGN KEY (configuration_version) REFERENCES configurations(version)
+                );
+
+                CREATE INDEX IF NOT EXISTS applied_states_created_at
+                    ON applied_states(created_at DESC);
+
+                CREATE TABLE IF NOT EXISTS analysis_captures (
+                    id TEXT PRIMARY KEY,
+                    session_id TEXT,
+                    created_at TEXT NOT NULL,
+                    applied_state_id TEXT NOT NULL,
+                    primary_json TEXT NOT NULL,
+                    context_json TEXT NOT NULL,
+                    FOREIGN KEY (session_id) REFERENCES sessions(id),
+                    FOREIGN KEY (applied_state_id) REFERENCES applied_states(id)
+                );
+
+                CREATE TABLE IF NOT EXISTS trade_candidates (
+                    id TEXT PRIMARY KEY,
+                    session_id TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    decision TEXT NOT NULL CHECK (decision IN ('ALLOWED', 'BLOCKED')),
+                    candidate_json TEXT NOT NULL,
+                    FOREIGN KEY (session_id) REFERENCES sessions(id)
+                );
+
+                CREATE INDEX IF NOT EXISTS trade_candidates_created_at
+                    ON trade_candidates(created_at DESC);
                 """
             )
             connection.execute(
@@ -89,6 +138,13 @@ class Storage:
             connection.execute(
                 "INSERT OR IGNORE INTO schema_meta(version, applied_at) VALUES (2, ?)",
                 (utc_now(),),
+            )
+            connection.execute(
+                "INSERT OR IGNORE INTO schema_meta(version, applied_at) VALUES (3, ?)",
+                (utc_now(),),
+            )
+            connection.execute(
+                "INSERT OR IGNORE INTO session_risk_state(session_id) SELECT id FROM sessions"
             )
             connection.commit()
 
@@ -144,6 +200,9 @@ class Storage:
             connection.execute(
                 "INSERT INTO sessions(id, started_at, ended_at, status) VALUES (?, ?, ?, ?)",
                 tuple(session.values()),
+            )
+            connection.execute(
+                "INSERT INTO session_risk_state(session_id) VALUES (?)", (session["id"],)
             )
             self._insert_event(
                 connection,
@@ -273,6 +332,198 @@ class Storage:
             detection["evidence"] = json.loads(detection.pop("evidence_json"))
             detections.append(detection)
         return detections
+
+    def get_pattern_detection(self, detection_id: str) -> dict[str, Any] | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT id, session_id, created_at, screenshot_sha256, screenshot_path, "
+                "pattern_id, pattern_version, result, reason, evidence_json "
+                "FROM pattern_detections WHERE id = ?",
+                (detection_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        detection = dict(row)
+        detection["evidence"] = json.loads(detection.pop("evidence_json"))
+        return detection
+
+    def record_configuration(self, version: str, desired: Mapping[str, Any]) -> None:
+        payload = json.dumps(dict(desired), separators=(",", ":"), sort_keys=True)
+        with self.connect() as connection:
+            connection.execute(
+                "INSERT OR IGNORE INTO configurations(version, created_at, desired_json) "
+                "VALUES (?, ?, ?)",
+                (version, utc_now(), payload),
+            )
+            existing = connection.execute(
+                "SELECT desired_json FROM configurations WHERE version = ?", (version,)
+            ).fetchone()
+            if existing is None or str(existing["desired_json"]) != payload:
+                raise ValueError("Configuration version is immutable.")
+            connection.commit()
+
+    def latest_configuration(self) -> dict[str, Any] | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT version, created_at, desired_json FROM configurations "
+                "ORDER BY created_at DESC LIMIT 1"
+            ).fetchone()
+        if row is None:
+            return None
+        result = dict(row)
+        result["desired"] = json.loads(result.pop("desired_json"))
+        return result
+
+    def record_applied_state(
+        self,
+        *,
+        configuration_version: str,
+        matches_desired: bool,
+        state: Mapping[str, Any],
+    ) -> str:
+        state_id = str(uuid4())
+        with self.connect() as connection:
+            connection.execute(
+                "INSERT INTO applied_states(id, configuration_version, created_at, "
+                "matches_desired, state_json) VALUES (?, ?, ?, ?, ?)",
+                (
+                    state_id,
+                    configuration_version,
+                    utc_now(),
+                    int(matches_desired),
+                    json.dumps(dict(state), separators=(",", ":"), sort_keys=True),
+                ),
+            )
+            connection.commit()
+        return state_id
+
+    def latest_applied_state(self) -> dict[str, Any] | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT id, configuration_version, created_at, matches_desired, state_json "
+                "FROM applied_states ORDER BY created_at DESC LIMIT 1"
+            ).fetchone()
+        if row is None:
+            return None
+        result = dict(row)
+        result["matches_desired"] = bool(result["matches_desired"])
+        result["state"] = json.loads(result.pop("state_json"))
+        return result
+
+    def record_analysis_capture(
+        self,
+        *,
+        session_id: str | None,
+        applied_state_id: str,
+        primary: Mapping[str, Any],
+        context: Mapping[str, Any],
+    ) -> str:
+        capture_id = str(uuid4())
+        with self.connect() as connection:
+            connection.execute(
+                "INSERT INTO analysis_captures(id, session_id, created_at, applied_state_id, "
+                "primary_json, context_json) VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    capture_id,
+                    session_id,
+                    utc_now(),
+                    applied_state_id,
+                    json.dumps(dict(primary), separators=(",", ":"), sort_keys=True),
+                    json.dumps(dict(context), separators=(",", ":"), sort_keys=True),
+                ),
+            )
+            connection.commit()
+        return capture_id
+
+    def get_analysis_capture(self, capture_id: str) -> dict[str, Any] | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT id, session_id, created_at, applied_state_id, primary_json, "
+                "context_json FROM analysis_captures WHERE id = ?",
+                (capture_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        result = dict(row)
+        result["primary"] = json.loads(result.pop("primary_json"))
+        result["context"] = json.loads(result.pop("context_json"))
+        return result
+
+    def get_applied_state(self, state_id: str) -> dict[str, Any] | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT id, configuration_version, created_at, matches_desired, state_json "
+                "FROM applied_states WHERE id = ?",
+                (state_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        result = dict(row)
+        result["matches_desired"] = bool(result["matches_desired"])
+        result["state"] = json.loads(result.pop("state_json"))
+        return result
+
+    def record_trade_candidate(
+        self,
+        candidate: Mapping[str, Any],
+        *,
+        max_trades: int,
+        max_consecutive_losses: int,
+        max_session_loss: float,
+    ) -> str:
+        candidate_id = str(candidate["candidate_id"])
+        session_id = str(candidate["session_id"])
+        decision = str(candidate["decision"])
+        payload = json.dumps(dict(candidate), separators=(",", ":"), sort_keys=True)
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            existing = connection.execute(
+                "SELECT candidate_json FROM trade_candidates WHERE id = ?", (candidate_id,)
+            ).fetchone()
+            if existing is not None:
+                if str(existing["candidate_json"]) != payload:
+                    raise ValueError("Trade candidate is immutable.")
+                connection.commit()
+                return candidate_id
+            if decision == "ALLOWED":
+                limits = connection.execute(
+                    "SELECT trades, consecutive_losses, loss FROM session_risk_state "
+                    "WHERE session_id = ?",
+                    (session_id,),
+                ).fetchone()
+                if limits is None:
+                    raise ValueError("Session risk state is missing transactionally.")
+                if (
+                    int(limits["trades"]) >= max_trades
+                    or int(limits["consecutive_losses"]) >= max_consecutive_losses
+                    or float(limits["loss"]) >= max_session_loss
+                ):
+                    raise ValueError("Session risk limit was reached transactionally.")
+            connection.execute(
+                "INSERT INTO trade_candidates(id, session_id, created_at, decision, "
+                "candidate_json) VALUES (?, ?, ?, ?, ?)",
+                (candidate_id, session_id, utc_now(), decision, payload),
+            )
+            connection.commit()
+        return candidate_id
+
+    def session_limits(self, session_id: str) -> dict[str, int | float] | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT trades, consecutive_losses, loss FROM session_risk_state "
+                "WHERE session_id = ?",
+                (session_id,),
+            ).fetchone()
+        return dict(row) if row is not None else None
+
+    def list_trade_candidates(self, limit: int = 100) -> list[dict[str, Any]]:
+        safe_limit = min(max(limit, 1), 500)
+        with self.connect() as connection:
+            rows = connection.execute(
+                "SELECT candidate_json FROM trade_candidates ORDER BY created_at DESC LIMIT ?",
+                (safe_limit,),
+            ).fetchall()
+        return [json.loads(str(row["candidate_json"])) for row in rows]
 
     def _insert_event(
         self,

@@ -5,7 +5,8 @@ fornece Core Engine local, persistência SQLite, sessões, eventos, API FastAPI,
 controle Streamlit e launcher single-instance. O `VectorAdapter` abre a Vector
 Web em um perfil persistente do Chromium e produz capturas observacionais. O
 primeiro vertical slice do Pattern Matcher detecta candles tradicionais e
-avalia o pacote `bearish_engulfing`.
+avalia o pacote `bearish_engulfing`. O preflight de contexto e risco produz
+candidatos locais imutáveis e sempre falha fechado quando falta evidência.
 
 ## Desenvolvimento
 
@@ -50,9 +51,22 @@ a imagem continua somente no filesystem.
 O catálogo `patterns/` é incluído no wheel. `PROVIDENCY_PATTERNS_DIR` pode
 apontar explicitamente para outro checkout durante desenvolvimento.
 
+## Contexto e risco
+
+O incremento 4 mantém configuração desejada e estado aplicado separados. A
+sincronização de símbolo, timeframe e médias usa PRE → ACTION → POST com
+seletores DOM explícitos. A escala de preços usa ao menos dois labels visíveis
+com geometria, sem OCR. O fluxo captura primary/context e verifica a restauração
+do primary antes de permitir um candidato.
+
+O candidato congela hashes das capturas, detecção, configuração, escala,
+confluências, entrada, stop, quantidade configurada, risco, RR e limites da
+sessão. `MISSING` ou `FAIL` bloqueia a proposta. Esta versão não expõe aprovação,
+Telegram, quantidade na Vector nem qualquer ação financeira.
+
 ## Limites atuais
 
-- O adapter apenas abre e captura a Vector Web; não altera símbolo ou timeframe.
+- Mudanças não financeiras exigem seletores explícitos calibrados para o layout.
 - O detector visual ainda requer calibração com screenshots reais sanitizadas.
 - Nenhuma mensagem Telegram.
 - Nenhuma ordem financeira.

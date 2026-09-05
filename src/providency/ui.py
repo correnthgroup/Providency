@@ -11,9 +11,14 @@ from PIL import Image, ImageDraw
 from providency.config import Settings
 
 
-def api_request(method: str, path: str) -> Any:
+def api_request(method: str, path: str, payload: dict[str, Any] | None = None) -> Any:
     settings = Settings.from_env()
-    request = urllib.request.Request(f"{settings.api_url}{path}", method=method)
+    request = urllib.request.Request(
+        f"{settings.api_url}{path}",
+        method=method,
+        data=json.dumps(payload).encode("utf-8") if payload is not None else None,
+        headers={"Content-Type": "application/json"} if payload is not None else {},
+    )
     try:
         with urllib.request.urlopen(request, timeout=2) as response:
             return json.loads(response.read().decode("utf-8"))
@@ -56,6 +61,19 @@ if session:
     st.subheader("Current session")
     st.code(f"{session['id']} · {session['started_at']}")
 
+st.subheader("Analysis configuration")
+configuration_state = api_request("GET", "/configuration")
+desired = configuration_state["desired"]
+missing = desired.get("missing_fields", [])
+if missing:
+    st.warning(
+        "Candidate evaluation is blocked until these fields are configured: "
+        + ", ".join(missing)
+    )
+else:
+    st.success(f"Configuration {desired['version']} is complete.")
+st.json(configuration_state, expanded=False)
+
 st.subheader("Activity")
 events = api_request("GET", "/events?limit=100")
 if not events:
@@ -70,7 +88,7 @@ else:
 st.subheader("Vector Web")
 vector_health = api_request("GET", "/vector/health")
 st.caption(f"Browser profile: {vector_health['state']}")
-open_column, capture_column, analyze_column = st.columns(3)
+open_column, sync_column, capture_column, analyze_column = st.columns(4)
 with open_column:
     if st.button("Open Vector", use_container_width=True):
         try:
@@ -80,27 +98,62 @@ with open_column:
             st.error(str(exc))
 with capture_column:
     if st.button(
-        "Capture primary chart",
+        "Capture analysis pair",
         disabled=vector_health["state"] != "OPEN",
         use_container_width=True,
     ):
         try:
-            capture = api_request("POST", "/vector/capture")
-            if capture["disposition"] == "USABLE":
-                st.success(f"{capture['symbol']} · {capture['timeframe']} · usable")
-                st.image(capture["path"], caption=f"SHA-256 {capture['sha256']}")
+            capture = api_request("POST", "/vector/capture-analysis")
+            st.session_state["last_analysis_capture"] = capture
+            st.session_state["last_pattern_analysis"] = capture["pattern"]
+            if (
+                capture["primary"]["disposition"] == "USABLE"
+                and capture["context"]["disposition"] == "USABLE"
+            ):
+                st.success("Primary and context captured; primary state restored.")
+                st.image(
+                    [capture["primary"]["path"], capture["context"]["path"]],
+                    caption=["Primary", "Context"],
+                )
             else:
-                st.warning(f"No decision: {capture['issue']}")
+                st.warning("No decision: one of the analysis captures is unusable.")
+        except RuntimeError as exc:
+            st.error(str(exc))
+with sync_column:
+    if st.button(
+        "Sync analysis state",
+        disabled=vector_health["state"] != "OPEN",
+        use_container_width=True,
+    ):
+        try:
+            synced = api_request("POST", "/vector/sync")
+            if synced["matches_desired"]:
+                st.success("Symbol, timeframe, moving averages, and price scale verified.")
+            else:
+                st.warning("Applied state is incomplete or divergent.")
+            st.json(synced, expanded=False)
         except RuntimeError as exc:
             st.error(str(exc))
 with analyze_column:
     if st.button(
-        "Capture and analyze",
-        disabled=vector_health["state"] != "OPEN",
+        "Evaluate candidate",
+        disabled=(
+            vector_health["state"] != "OPEN"
+            or not running
+            or "last_analysis_capture" not in st.session_state
+        ),
         use_container_width=True,
     ):
         try:
-            st.session_state["last_pattern_analysis"] = api_request("POST", "/pattern/analyze")
+            captured = st.session_state["last_analysis_capture"]
+            st.session_state["last_candidate"] = api_request(
+                "POST",
+                "/candidate/evaluate",
+                {
+                    "analysis_capture_id": captured["analysis_capture_id"],
+                    "pattern_detection_id": captured["pattern_detection_id"],
+                },
+            )
         except RuntimeError as exc:
             st.error(str(exc))
 
@@ -147,3 +200,32 @@ if analysis:
             use_container_width=True,
         )
     st.json({"measures": analysis["measures"]}, expanded=False)
+
+st.subheader("Trade candidates")
+st.caption("Read-only local preflight; no approval or execution is available in this increment.")
+candidates = api_request("GET", "/candidates?limit=20")
+if not candidates:
+    st.info("No candidate has been evaluated yet.")
+else:
+    for candidate in candidates:
+        decision = candidate["decision"]
+        if decision == "ALLOWED":
+            st.success(f"{candidate['candidate_id'][:12]} · {decision}")
+        else:
+            st.warning(f"{candidate['candidate_id'][:12]} · {decision}")
+        st.write(
+            {
+                "entry": candidate["entry"],
+                "stop": candidate["stop"],
+                "quantity": candidate["quantity"],
+                "risk_amount": candidate["risk_amount"],
+                "reference_target": candidate["reference_target"],
+                "reference_rr": candidate["reference_rr"],
+                "confluence": (
+                    f"{candidate['confluence']['passed_total']}/"
+                    f"{candidate['confluence']['applicable_total']}"
+                ),
+                "limits": candidate["limits"],
+                "blocking_reasons": candidate["blocking_reasons"],
+            }
+        )
