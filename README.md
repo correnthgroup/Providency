@@ -11,6 +11,9 @@ incremento 5 envia propostas imutáveis pelo Telegram e, após SIM, só registra
 `WOULD_EXECUTE` depois de uma nova captura e rechecagem completa. O incremento 6
 mantém `DRY_RUN` como padrão e adiciona execução supervisionada exclusivamente em
 conta demo, com intenção idempotente, PRE/ACTION/POST e reconciliação explícita.
+O incremento 8 adiciona revisão humana append-only, cópias sanitizadas de
+evidência, relatórios reproduzíveis de sessão e métricas com denominadores e
+versões explícitas.
 
 ## Desenvolvimento
 
@@ -91,6 +94,18 @@ bloqueio de nova exposição. O restart reconcilia posição e proteção antes 
 retomar. `EMERGENCY_STOP` só existe por comando humano explícito na API/UI e faz
 no máximo uma tentativa auditada de cancelar a proteção e encerrar a posição
 demo; resultado ambíguo nunca recebe retry automático.
+
+## Uso diário e melhoria
+
+As abas **Session overview**, **Human review** e **Pattern quality** mostram o
+funil operacional, permitem exportar o relatório local, criam revisões
+versionadas e exibem precision/recall sem ocultar denominadores ou insuficiência
+de amostra. A política completa de baseline, sanitização, retenção, taxonomia e
+calibração está em `DAILY_OPERATIONS.md`.
+
+Screenshots sanitizadas ficam em `sanitized-evidence/` sob
+`PROVIDENCY_DATA_DIR`; relatórios ficam em `reports/`. A retenção padrão é 30
+dias e pode ser ajustada por `PROVIDENCY_EVIDENCE_RETENTION_DAYS`.
 
 ## Limites atuais
 

@@ -1,0 +1,18 @@
+schema_version: 1
+corpus_version: "0.8.0"
+review_policy: human_visual_review
+assets:
+  - file: no_match_real_001.png
+    metadata: no_match_real_001.yaml
+    pattern_id: bearish_engulfing
+    pattern_version: "0.1.0"
+    expected: NO_MATCH
+    role: hard_negative
+    sanitization: exact_pixel_crop
+gaps:
+  - sanitized_real_match
+  - sanitized_real_forming
+  - reviewed_false_positive
+  - reviewed_false_negative
+calibration_decision: stabilize_existing_pattern
+new_pattern_package: null

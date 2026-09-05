@@ -10,6 +10,8 @@ from PIL import Image
 
 from providency.patterns import Candle, CandleBox, VisualCandle
 
+DETECTOR_VERSION = "0.8.0"
+
 
 class VisionDetectionError(ValueError):
     pass

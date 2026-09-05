@@ -5,10 +5,11 @@ import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any, Literal
 
 from fastapi import FastAPI, HTTPException, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from providency.approvals import ApprovalError, ApprovalService, render_proposal
 from providency.config import ExecutionMode, Settings
@@ -21,9 +22,13 @@ from providency.context import (
     PriceScaleError,
     analyze_context,
 )
+from providency.evidence import EvidenceSanitizer, RedactionRegion
 from providency.execution import DemoExecutionService
+from providency.metrics import pattern_metrics
 from providency.patterns import Candle, PatternMatcher, PatternPackage
 from providency.protection import PositionProtectionService
+from providency.reporting import build_session_report, export_session_report
+from providency.review import ReviewLabel, ReviewRequest, ReviewService
 from providency.risk import RiskPolicy, SessionLimits, build_candidate
 from providency.service import EngineService, PatternAnalysisService
 from providency.storage import Storage
@@ -67,6 +72,28 @@ class CandidateEvaluationPayload(BaseModel):
 
 class EmergencyStopPayload(BaseModel):
     confirm_demo_close: bool = False
+
+
+class RedactionPayload(BaseModel):
+    x: int
+    y: int
+    width: int
+    height: int
+
+
+class EvidenceSanitizePayload(BaseModel):
+    detection_id: str
+    redactions: list[RedactionPayload] = Field(default_factory=list)
+
+
+class ReviewPayload(BaseModel):
+    detection_id: str | None = None
+    candidate_id: str | None = None
+    label: ReviewLabel
+    notes: str
+    reviewer_id: str = "local:operator"
+    evidence_sha256: str
+    evidence_path: str
 
 
 def _absolute_candles(
@@ -129,6 +156,8 @@ def create_app(
         mode=resolved.execution_mode,
         protection=protection,
     )
+    reviews = ReviewService(service.storage)
+    evidence = EvidenceSanitizer(resolved.data_dir / "sanitized-evidence")
     telegram_offset: int | None = None
     telegram_poll_error = False
     stop_polling = asyncio.Event()
@@ -149,7 +178,7 @@ def create_app(
                     await task
             await adapter.stop()
 
-    app = FastAPI(title="Providency Core Engine", version="0.7.0", lifespan=lifespan)
+    app = FastAPI(title="Providency Core Engine", version="0.8.0", lifespan=lifespan)
 
     def vector_error(exc: VectorAdapterError) -> HTTPException:
         session = service.storage.running_session()
@@ -197,6 +226,25 @@ def create_app(
     @app.get("/events", response_model=list[EventPayload])
     def events(limit: int = Query(default=100, ge=1, le=500)) -> list[dict[str, Any]]:
         return service.storage.list_events(limit)
+
+    @app.get("/sessions/{session_id}/report")
+    def session_report(session_id: str) -> dict[str, Any]:
+        try:
+            return build_session_report(service.storage, session_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post("/sessions/{session_id}/report/export")
+    def session_report_export(session_id: str) -> dict[str, str]:
+        try:
+            path = export_session_report(
+                service.storage,
+                session_id,
+                resolved.data_dir / "reports",
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        return {"path": str(path)}
 
     @app.get("/configuration")
     def configured_state() -> dict[str, Any]:
@@ -375,6 +423,88 @@ def create_app(
         limit: int = Query(default=100, ge=1, le=500),
     ) -> list[dict[str, Any]]:
         return service.storage.list_pattern_detections(limit)
+
+    @app.post("/evidence/sanitize")
+    def sanitize_evidence(payload: EvidenceSanitizePayload) -> dict[str, Any]:
+        detection = service.storage.get_pattern_detection(payload.detection_id)
+        if detection is None:
+            raise HTTPException(status_code=404, detail="Pattern detection was not found.")
+        try:
+            source_path = Path(str(detection["screenshot_path"])).resolve(strict=True)
+            if not source_path.is_relative_to(resolved.capture_dir.resolve()):
+                raise ValueError("Evidence source is outside the Providency capture directory.")
+            result = evidence.sanitize(
+                source_path,
+                source_sha256=str(detection["screenshot_sha256"]),
+                redactions=tuple(
+                    RedactionRegion(
+                        x=item.x,
+                        y=item.y,
+                        width=item.width,
+                        height=item.height,
+                    )
+                    for item in payload.redactions
+                ),
+                metadata={
+                    "detection_id": detection["id"],
+                    "pattern_id": detection["pattern_id"],
+                    "pattern_version": detection["pattern_version"],
+                    "result": detection["result"],
+                },
+            )
+        except (OSError, ValueError) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return result.to_dict()
+
+    @app.post("/evidence/retention")
+    def apply_evidence_retention() -> dict[str, Any]:
+        try:
+            moved = evidence.apply_retention(
+                retention_days=resolved.evidence_retention_days
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return {
+            "retention_days": resolved.evidence_retention_days,
+            "moved_to_recoverable_trash": [str(path) for path in moved],
+        }
+
+    @app.post("/reviews")
+    def create_review(payload: ReviewPayload) -> dict[str, Any]:
+        try:
+            evidence_path = Path(payload.evidence_path).resolve(strict=True)
+            if not evidence_path.is_relative_to(evidence.destination):
+                raise ValueError("Review evidence must be a Providency sanitized copy.")
+            return reviews.create(
+                ReviewRequest(
+                    detection_id=payload.detection_id,
+                    candidate_id=payload.candidate_id,
+                    label=payload.label,
+                    notes=payload.notes,
+                    reviewer_id=payload.reviewer_id,
+                    evidence_sha256=payload.evidence_sha256,
+                    evidence_path=str(evidence_path),
+                )
+            )
+        except (OSError, ValueError) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.get("/reviews")
+    def list_reviews(limit: int = Query(default=100, ge=1, le=500)) -> list[dict[str, Any]]:
+        return service.storage.list_human_reviews(limit)
+
+    @app.get("/metrics/patterns/{pattern_id}")
+    def metrics(
+        pattern_id: str,
+        limit: int = Query(default=500, ge=1, le=500),
+        minimum_sample: int = Query(default=20, ge=1, le=10000),
+    ) -> dict[str, Any]:
+        return pattern_metrics(
+            service.storage,
+            pattern_id,
+            limit=limit,
+            minimum_sample=minimum_sample,
+        )
 
     @app.post("/candidate/evaluate")
     def candidate_evaluate(payload: CandidateEvaluationPayload) -> dict[str, Any]:

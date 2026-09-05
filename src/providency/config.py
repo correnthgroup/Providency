@@ -147,6 +147,11 @@ class Settings:
     analysis_configuration: AnalysisConfiguration | None = None
     telegram_configuration: TelegramConfiguration | None = None
     execution_mode: ExecutionMode = ExecutionMode.DRY_RUN
+    evidence_retention_days: int = 30
+
+    def __post_init__(self) -> None:
+        if self.evidence_retention_days < 1:
+            raise ValueError("Evidence retention must be at least one day.")
 
     @property
     def database_path(self) -> Path:
@@ -207,4 +212,5 @@ class Settings:
             execution_mode=ExecutionMode(
                 os.getenv("PROVIDENCY_EXECUTION_MODE", ExecutionMode.DRY_RUN.value).strip().upper()
             ),
+            evidence_retention_days=int(os.getenv("PROVIDENCY_EVIDENCE_RETENTION_DAYS", "30")),
         )

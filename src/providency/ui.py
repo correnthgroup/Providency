@@ -65,6 +65,128 @@ if session:
     st.subheader("Current session")
     st.code(f"{session['id']} · {session['started_at']}")
 
+overview_tab, review_tab, quality_tab = st.tabs(
+    ["Session overview", "Human review", "Pattern quality"]
+)
+with overview_tab:
+    if session:
+        report = api_request("GET", f"/sessions/{session['id']}/report")
+        funnel = report["funnel"]
+        columns = st.columns(4)
+        columns[0].metric("Captures", funnel["captures"])
+        columns[1].metric("Confirmed patterns", funnel["confirmed_patterns"])
+        columns[2].metric("Candidates", funnel["candidates"])
+        columns[3].metric("Filled demo operations", funnel["filled_operations"])
+        if report["blocking_reasons"]:
+            st.warning("Blocking reasons are present in this session.")
+            st.json(report["blocking_reasons"], expanded=False)
+        if st.button("Export reproducible session report"):
+            exported = api_request("POST", f"/sessions/{session['id']}/report/export")
+            st.success(f"Report saved locally: {exported['path']}")
+    else:
+        st.info("Start a session to build its operational funnel.")
+
+with review_tab:
+    detections_for_review = api_request("GET", "/pattern/detections?limit=100")
+    if not detections_for_review:
+        st.info("Capture and analyze a chart before creating a human review.")
+    else:
+        detection_by_id = {item["id"]: item for item in detections_for_review}
+        selected_detection_id = st.selectbox(
+            "Detection",
+            options=list(detection_by_id),
+            format_func=lambda item: (
+                f"{detection_by_id[item]['created_at']} · "
+                f"{detection_by_id[item]['result']} · {item[:12]}"
+            ),
+        )
+        selected_detection = detection_by_id[selected_detection_id]
+        st.caption(selected_detection["reason"])
+        if st.button("Create sanitized review copy"):
+            st.session_state["sanitized_review_evidence"] = api_request(
+                "POST",
+                "/evidence/sanitize",
+                {"detection_id": selected_detection_id, "redactions": []},
+            )
+        sanitized = st.session_state.get("sanitized_review_evidence")
+        if sanitized and sanitized["source_sha256"] == selected_detection["screenshot_sha256"]:
+            st.image(sanitized["path"], caption="Sanitized local evidence")
+            label = st.selectbox(
+                "Review label",
+                options=[
+                    "TRUE_POSITIVE",
+                    "FALSE_POSITIVE",
+                    "FALSE_NEGATIVE",
+                    "TRUE_NEGATIVE",
+                    "NO_DECISION",
+                    "OPERATIONAL_FAILURE",
+                ],
+            )
+            notes = st.text_area("Review notes", max_chars=500)
+            if st.button("Save immutable review revision", disabled=not notes.strip()):
+                saved = api_request(
+                    "POST",
+                    "/reviews",
+                    {
+                        "detection_id": selected_detection_id,
+                        "label": label,
+                        "notes": notes,
+                        "reviewer_id": "local:operator",
+                        "evidence_sha256": sanitized["source_sha256"],
+                        "evidence_path": sanitized["path"],
+                    },
+                )
+                st.success(f"Review saved as revision {saved['revision']}.")
+                st.rerun()
+        reviews = api_request("GET", "/reviews?limit=20")
+        if reviews:
+            st.dataframe(
+                [
+                    {
+                        "created_at": item["created_at"],
+                        "label": item["label"],
+                        "revision": item["revision"],
+                        "pattern_version": item["pattern_version"],
+                        "notes": item["notes"],
+                    }
+                    for item in reviews
+                ],
+                use_container_width=True,
+            )
+
+with quality_tab:
+    metrics = api_request("GET", "/metrics/patterns/bearish_engulfing")
+    precision = metrics["precision"]
+    recall = metrics["recall"]
+    quality_columns = st.columns(3)
+    quality_columns[0].metric(
+        "Precision",
+        "Insufficient sample"
+        if precision["value"] is None
+        else f"{precision['value'] * 100:.1f}%",
+        help=f"{precision['numerator']}/{precision['denominator']} confirmed reviews",
+    )
+    quality_columns[1].metric(
+        "Recall",
+        "Not defensible" if recall["value"] is None else f"{recall['value'] * 100:.1f}%",
+        help=f"{recall['numerator']}/{recall['denominator']} reviewed positives",
+    )
+    quality_columns[2].metric("Reviewed", metrics["reviewed_total"])
+    if not metrics["sample_sufficient"]:
+        st.info(
+            "Precision is descriptive only until the confirmed-review denominator reaches "
+            f"{metrics['minimum_sample']}."
+        )
+    st.json(
+        {
+            "counts": metrics["counts"],
+            "window": metrics["window"],
+            "detector_versions": metrics["detector_versions"],
+            "pattern_versions": metrics["pattern_versions"],
+        },
+        expanded=False,
+    )
+
 st.subheader("Analysis configuration")
 configuration_state = api_request("GET", "/configuration")
 desired = configuration_state["desired"]

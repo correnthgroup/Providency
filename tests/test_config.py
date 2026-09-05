@@ -53,3 +53,9 @@ def test_trailing_timeframe_is_explicit_configuration(
 ) -> None:
     monkeypatch.setenv("PROVIDENCY_TRAILING_TIMEFRAME", "30min")
     assert Settings.from_env().trading_configuration.trailing_timeframe == "30min"
+
+
+def test_evidence_retention_must_be_positive(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("PROVIDENCY_EVIDENCE_RETENTION_DAYS", "0")
+    with pytest.raises(ValueError, match="retention"):
+        Settings.from_env()

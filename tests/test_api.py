@@ -8,6 +8,7 @@ from synthetic_chart import bearish_engulfing_chart
 from providency.api import create_app
 from providency.config import AnalysisConfiguration, ExecutionMode, Settings, TelegramConfiguration
 from providency.context import ConfluenceItem, ConfluenceResult, ConfluenceStatus, PriceAnchor
+from providency.evidence import file_sha256
 from providency.telegram import TelegramCallback, TelegramPollBatch
 from providency.vector import (
     AccountEnvironment,
@@ -565,3 +566,41 @@ def test_demo_mode_executes_one_rechecked_operation_and_exposes_state(
             json={"confirm_demo_close": True},
         )
         assert emergency.json()["status"] == "CONFIRMED"
+
+
+def test_daily_review_report_metrics_and_sanitized_evidence_api(tmp_path: Path) -> None:
+    capture_dir = tmp_path / "captures"
+    capture_dir.mkdir()
+    capture_path = bearish_engulfing_chart(capture_dir / "capture.png")
+    adapter = FakeVectorAdapter(capture_path)
+    adapter.sha256 = file_sha256(capture_path)
+    app = create_app(settings(tmp_path), recover=False, vector_adapter=adapter)
+
+    with TestClient(app) as client:
+        session = client.post("/run").json()
+        analyzed = client.post("/vector/capture-analysis").json()
+        detection_id = analyzed["pattern_detection_id"]
+        sanitized = client.post(
+            "/evidence/sanitize",
+            json={"detection_id": detection_id, "redactions": []},
+        ).json()
+        review = client.post(
+            "/reviews",
+            json={
+                "detection_id": detection_id,
+                "label": "TRUE_POSITIVE",
+                "notes": "Closed candle and geometry checked locally.",
+                "reviewer_id": "local:operator",
+                "evidence_sha256": sanitized["source_sha256"],
+                "evidence_path": sanitized["path"],
+            },
+        )
+
+        assert review.status_code == 200
+        assert review.json()["revision"] == 1
+        metrics = client.get("/metrics/patterns/bearish_engulfing").json()
+        assert metrics["precision"]["denominator"] == 1
+        report = client.get(f"/sessions/{session['id']}/report").json()
+        assert report["funnel"]["detections"] == 1
+        exported = client.post(f"/sessions/{session['id']}/report/export").json()
+        assert Path(exported["path"]).is_file()

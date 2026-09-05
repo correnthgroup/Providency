@@ -225,6 +225,39 @@ class Storage:
                     reason TEXT,
                     FOREIGN KEY (protection_policy_id) REFERENCES protection_policies(id)
                 );
+
+                CREATE TABLE IF NOT EXISTS human_reviews (
+                    id TEXT PRIMARY KEY,
+                    review_key TEXT NOT NULL,
+                    revision INTEGER NOT NULL CHECK (revision > 0),
+                    previous_review_id TEXT,
+                    session_id TEXT,
+                    detection_id TEXT,
+                    candidate_id TEXT,
+                    created_at TEXT NOT NULL,
+                    label TEXT NOT NULL CHECK (label IN (
+                        'TRUE_POSITIVE', 'FALSE_POSITIVE', 'FALSE_NEGATIVE',
+                        'TRUE_NEGATIVE', 'NO_DECISION', 'OPERATIONAL_FAILURE'
+                    )),
+                    notes TEXT NOT NULL,
+                    reviewer_id TEXT NOT NULL,
+                    evidence_sha256 TEXT NOT NULL,
+                    evidence_path TEXT NOT NULL,
+                    detector_version TEXT NOT NULL,
+                    pattern_id TEXT NOT NULL,
+                    pattern_version TEXT NOT NULL,
+                    UNIQUE(review_key, revision),
+                    CHECK ((detection_id IS NULL) != (candidate_id IS NULL)),
+                    FOREIGN KEY (previous_review_id) REFERENCES human_reviews(id),
+                    FOREIGN KEY (session_id) REFERENCES sessions(id),
+                    FOREIGN KEY (detection_id) REFERENCES pattern_detections(id),
+                    FOREIGN KEY (candidate_id) REFERENCES trade_candidates(id)
+                );
+
+                CREATE INDEX IF NOT EXISTS human_reviews_created_at
+                    ON human_reviews(created_at DESC);
+                CREATE INDEX IF NOT EXISTS human_reviews_pattern
+                    ON human_reviews(pattern_id, pattern_version, created_at DESC);
                 """
             )
             connection.execute(
@@ -249,6 +282,10 @@ class Storage:
             )
             connection.execute(
                 "INSERT OR IGNORE INTO schema_meta(version, applied_at) VALUES (6, ?)",
+                (utc_now(),),
+            )
+            connection.execute(
+                "INSERT OR IGNORE INTO schema_meta(version, applied_at) VALUES (7, ?)",
                 (utc_now(),),
             )
             connection.execute(
@@ -1246,6 +1283,98 @@ class Storage:
         if row is None:
             raise ValueError("Emergency operation is missing.")
         return self._emergency_row(row)
+
+    @staticmethod
+    def _human_review_row(row: sqlite3.Row) -> dict[str, Any]:
+        return dict(row)
+
+    def create_human_review(
+        self,
+        *,
+        session_id: str | None,
+        detection_id: str | None,
+        candidate_id: str | None,
+        label: str,
+        notes: str,
+        reviewer_id: str,
+        evidence_sha256: str,
+        evidence_path: str,
+        detector_version: str,
+        pattern_id: str,
+        pattern_version: str,
+    ) -> dict[str, Any]:
+        review_key = (
+            f"detection:{detection_id}"
+            if detection_id is not None
+            else f"candidate:{candidate_id}"
+        )
+        review_id = str(uuid4())
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            previous = connection.execute(
+                "SELECT id, revision FROM human_reviews WHERE review_key = ? "
+                "ORDER BY revision DESC LIMIT 1",
+                (review_key,),
+            ).fetchone()
+            revision = int(previous["revision"]) + 1 if previous is not None else 1
+            previous_id = str(previous["id"]) if previous is not None else None
+            connection.execute(
+                "INSERT INTO human_reviews(id, review_key, revision, previous_review_id, "
+                "session_id, detection_id, candidate_id, created_at, label, notes, "
+                "reviewer_id, evidence_sha256, evidence_path, detector_version, pattern_id, "
+                "pattern_version) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    review_id,
+                    review_key,
+                    revision,
+                    previous_id,
+                    session_id,
+                    detection_id,
+                    candidate_id,
+                    utc_now(),
+                    label,
+                    notes,
+                    reviewer_id,
+                    evidence_sha256,
+                    evidence_path,
+                    detector_version,
+                    pattern_id,
+                    pattern_version,
+                ),
+            )
+            row = connection.execute(
+                "SELECT * FROM human_reviews WHERE id = ?", (review_id,)
+            ).fetchone()
+            connection.commit()
+        assert row is not None
+        return self._human_review_row(row)
+
+    def list_human_reviews(self, limit: int = 100) -> list[dict[str, Any]]:
+        safe_limit = min(max(limit, 1), 500)
+        with self.connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM human_reviews ORDER BY created_at DESC, revision DESC LIMIT ?",
+                (safe_limit,),
+            ).fetchall()
+        return [self._human_review_row(row) for row in rows]
+
+    def list_latest_human_reviews(
+        self,
+        *,
+        pattern_id: str,
+        limit: int = 500,
+    ) -> list[dict[str, Any]]:
+        safe_limit = min(max(limit, 1), 500)
+        with self.connect() as connection:
+            rows = connection.execute(
+                "SELECT review.* FROM human_reviews review "
+                "WHERE review.pattern_id = ? AND review.revision = ("
+                "SELECT MAX(latest.revision) FROM human_reviews latest "
+                "WHERE latest.review_key = review.review_key) "
+                "ORDER BY review.created_at DESC LIMIT ?",
+                (pattern_id, safe_limit),
+            ).fetchall()
+        return [self._human_review_row(row) for row in rows]
 
     def _insert_event(
         self,
