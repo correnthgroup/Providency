@@ -1,11 +1,14 @@
+from dataclasses import replace
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 from synthetic_chart import bearish_engulfing_chart
 
 from providency.api import create_app
-from providency.config import AnalysisConfiguration, Settings
-from providency.context import PriceAnchor
+from providency.config import AnalysisConfiguration, Settings, TelegramConfiguration
+from providency.context import ConfluenceItem, ConfluenceResult, ConfluenceStatus, PriceAnchor
+from providency.telegram import TelegramCallback, TelegramPollBatch
 from providency.vector import (
     AppliedVectorState,
     CaptureDisposition,
@@ -30,6 +33,7 @@ class FakeVectorAdapter:
     def __init__(self, capture_path: Path) -> None:
         self.capture_path = capture_path
         self.stopped = False
+        self.sha256 = "a" * 64
 
     async def health_check(self) -> dict[str, str]:
         return {"state": "OPEN"}
@@ -47,7 +51,7 @@ class FakeVectorAdapter:
             timeframe="15m",
             region=CaptureRegion(x=1, y=2, width=640, height=360),
             path=self.capture_path,
-            sha256="a" * 64,
+            sha256=self.sha256,
         )
 
     async def sync_analysis_state(self, desired: DesiredVectorState) -> StateSyncResult:
@@ -82,6 +86,58 @@ class FakeVectorAdapter:
 
     async def stop(self) -> None:
         self.stopped = True
+
+
+class FakeTelegramClient:
+    def __init__(self) -> None:
+        self.yes_callback = ""
+        self.no_callback = ""
+        self.callbacks: list[TelegramCallback] = []
+        self.answers: list[str] = []
+
+    async def health_check(self) -> dict[str, str]:
+        return {"state": "READY", "bot_username": "providency_test_bot"}
+
+    async def send_proposal(
+        self, *, chat_id: int, text: str, yes_callback: str, no_callback: str
+    ) -> dict[str, int]:
+        assert chat_id == 10
+        assert "WOULD_EXECUTE" in text
+        self.yes_callback = yes_callback
+        self.no_callback = no_callback
+        return {"message_id": 7, "chat_id": chat_id}
+
+    async def poll(self, *, offset: int | None = None) -> TelegramPollBatch:
+        callbacks = tuple(self.callbacks)
+        self.callbacks.clear()
+        next_offset = callbacks[-1].update_id + 1 if callbacks else offset
+        return TelegramPollBatch(callbacks, next_offset)
+
+    async def answer_callback(self, callback_query_id: str, text: str) -> None:
+        self.answers.append(text)
+
+    def queue(self, data: str, *, chat_id: int, user_id: int) -> None:
+        self.callbacks.append(
+            TelegramCallback(
+                update_id=len(self.answers) + len(self.callbacks) + 1,
+                callback_query_id=f"callback-{len(self.answers) + len(self.callbacks) + 1}",
+                data=data,
+                chat_id=chat_id,
+                user_id=user_id,
+            )
+        )
+
+
+def all_context_checks_pass(**_: object) -> ConfluenceResult:
+    passed = ConfluenceItem(ConfluenceStatus.PASS, "Verified in test.")
+    return ConfluenceResult(
+        {
+            "trend": passed,
+            "structure": passed,
+            "support_resistance": passed,
+            "context_timeframe": passed,
+        }
+    )
 
 
 def test_run_stop_and_activity_api(tmp_path: Path) -> None:
@@ -201,3 +257,125 @@ def test_candidate_api_exposes_complete_auditable_preflight(tmp_path: Path) -> N
         assert candidate["configuration_snapshot"]["version"] == configuration.version
         assert candidate["applied_state_id"] == capture_pair["applied_state_id"]
         assert client.get("/candidates").json()[0]["candidate_id"] == candidate["candidate_id"]
+
+
+def test_telegram_approval_rechecks_and_records_would_execute_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("providency.api.analyze_context", all_context_checks_pass)
+    configuration = AnalysisConfiguration(
+        symbol="BTC/BRL",
+        primary_timeframe="15min",
+        context_timeframe="1h",
+        short_ma_period=7,
+        long_ma_period=70,
+        quantity=2,
+        tick_size=0.5,
+        tick_value=1.0,
+        max_trades=3,
+        max_consecutive_losses=2,
+        max_session_loss=100,
+        support_resistance_tolerance=5,
+    )
+    configured = settings(tmp_path, configuration)
+    configured = replace(
+        configured,
+        telegram_configuration=TelegramConfiguration(
+            chat_id=10, user_id=20, approval_ttl_seconds=60
+        ),
+    )
+    adapter = FakeVectorAdapter(tmp_path / "capture.webp")
+    bearish_engulfing_chart(adapter.capture_path)
+    telegram = FakeTelegramClient()
+    app = create_app(
+        configured,
+        recover=False,
+        vector_adapter=adapter,
+        telegram_client=telegram,
+        telegram_polling=False,
+    )
+
+    with TestClient(app) as client:
+        client.post("/run")
+        captured = client.post("/vector/capture-analysis").json()
+        candidate = client.post(
+            "/candidate/evaluate",
+            json={
+                "analysis_capture_id": captured["analysis_capture_id"],
+                "pattern_detection_id": captured["pattern_detection_id"],
+            },
+        ).json()
+        assert candidate["decision"] == "ALLOWED", candidate
+
+        sent = client.post(f"/approvals/{candidate['candidate_id']}")
+        assert sent.status_code == 200
+        assert sent.json()["status"] == "PENDING"
+        assert sent.json()["telegram"] == {"chat_id": 10, "message_id": 7}
+
+        telegram.queue(telegram.yes_callback, chat_id=11, user_id=20)
+        wrong = client.post("/telegram/poll-once")
+        assert wrong.json() == []
+        assert telegram.answers[-1] == "Rejected"
+        telegram.queue(telegram.yes_callback, chat_id=10, user_id=20)
+        approved = client.post("/telegram/poll-once")
+        assert approved.status_code == 200
+        assert approved.json()[0]["status"] == "WOULD_EXECUTE", approved.json()[0]["reason"]
+        telegram.queue(telegram.yes_callback, chat_id=10, user_id=20)
+        duplicate = client.post("/telegram/poll-once")
+        assert duplicate.json() == []
+        events = client.get("/events").json()
+        assert [event["event_type"] for event in events].count("WOULD_EXECUTE") == 1
+
+
+def test_approved_proposal_is_cancelled_when_market_capture_changes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("providency.api.analyze_context", all_context_checks_pass)
+    configuration = AnalysisConfiguration(
+        symbol="BTC/BRL",
+        primary_timeframe="15min",
+        context_timeframe="1h",
+        short_ma_period=7,
+        long_ma_period=70,
+        quantity=2,
+        tick_size=0.5,
+        tick_value=1.0,
+        max_trades=3,
+        max_consecutive_losses=2,
+        max_session_loss=100,
+        support_resistance_tolerance=5,
+    )
+    configured = settings(tmp_path, configuration)
+    configured = replace(
+        configured,
+        telegram_configuration=TelegramConfiguration(chat_id=10, user_id=20),
+    )
+    adapter = FakeVectorAdapter(tmp_path / "capture.webp")
+    bearish_engulfing_chart(adapter.capture_path)
+    telegram = FakeTelegramClient()
+    app = create_app(
+        configured,
+        recover=False,
+        vector_adapter=adapter,
+        telegram_client=telegram,
+        telegram_polling=False,
+    )
+
+    with TestClient(app) as client:
+        client.post("/run")
+        captured = client.post("/vector/capture-analysis").json()
+        candidate = client.post(
+            "/candidate/evaluate",
+            json={
+                "analysis_capture_id": captured["analysis_capture_id"],
+                "pattern_detection_id": captured["pattern_detection_id"],
+            },
+        ).json()
+        client.post(f"/approvals/{candidate['candidate_id']}")
+        adapter.sha256 = "b" * 64
+
+        telegram.queue(telegram.yes_callback, chat_id=10, user_id=20)
+        result = client.post("/telegram/poll-once").json()[0]
+
+        assert result["status"] == "CANCELLED"
+        assert "primary_capture_sha256 changed" in result["reason"]

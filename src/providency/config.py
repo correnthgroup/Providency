@@ -11,6 +11,41 @@ from platformdirs import user_data_path
 
 
 @dataclass(frozen=True, slots=True)
+class TelegramConfiguration:
+    chat_id: int = 0
+    user_id: int = 0
+    approval_ttl_seconds: int = 60
+    recheck_price_tolerance_ticks: int = 1
+
+    @property
+    def missing_fields(self) -> tuple[str, ...]:
+        missing: list[str] = []
+        if self.chat_id == 0:
+            missing.append("chat_id")
+        if self.user_id <= 0:
+            missing.append("user_id")
+        if self.approval_ttl_seconds <= 0:
+            missing.append("approval_ttl_seconds")
+        if self.recheck_price_tolerance_ticks < 0:
+            missing.append("recheck_price_tolerance_ticks")
+        return tuple(missing)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {**asdict(self), "missing_fields": self.missing_fields, "token": "MASKED"}
+
+    @classmethod
+    def from_env(cls) -> TelegramConfiguration:
+        return cls(
+            chat_id=int(os.getenv("PROVIDENCY_TELEGRAM_CHAT_ID", "0")),
+            user_id=int(os.getenv("PROVIDENCY_TELEGRAM_USER_ID", "0")),
+            approval_ttl_seconds=int(os.getenv("PROVIDENCY_APPROVAL_TTL_SECONDS", "60")),
+            recheck_price_tolerance_ticks=int(
+                os.getenv("PROVIDENCY_RECHECK_PRICE_TOLERANCE_TICKS", "1")
+            ),
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class AnalysisConfiguration:
     schema_version: int = 1
     symbol: str = ""
@@ -101,6 +136,7 @@ class Settings:
     vector_url: str = ""
     patterns_dir: Path | None = None
     analysis_configuration: AnalysisConfiguration | None = None
+    telegram_configuration: TelegramConfiguration | None = None
 
     @property
     def database_path(self) -> Path:
@@ -134,6 +170,10 @@ class Settings:
     @property
     def trading_configuration(self) -> AnalysisConfiguration:
         return self.analysis_configuration or AnalysisConfiguration.from_env()
+
+    @property
+    def telegram(self) -> TelegramConfiguration:
+        return self.telegram_configuration or TelegramConfiguration.from_env()
 
     @classmethod
     def from_env(cls) -> Settings:

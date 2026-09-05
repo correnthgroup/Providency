@@ -129,6 +129,31 @@ class Storage:
 
                 CREATE INDEX IF NOT EXISTS trade_candidates_created_at
                     ON trade_candidates(created_at DESC);
+
+                CREATE TABLE IF NOT EXISTS approvals (
+                    id TEXT PRIMARY KEY,
+                    candidate_id TEXT NOT NULL UNIQUE,
+                    session_id TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    expires_at TEXT NOT NULL,
+                    decided_at TEXT,
+                    status TEXT NOT NULL CHECK (status IN (
+                        'PENDING', 'APPROVED', 'REJECTED', 'EXPIRED', 'CANCELLED',
+                        'WOULD_EXECUTE'
+                    )),
+                    chat_id INTEGER NOT NULL,
+                    user_id INTEGER NOT NULL,
+                    callback_digest TEXT NOT NULL UNIQUE,
+                    candidate_json TEXT NOT NULL,
+                    telegram_json TEXT,
+                    recheck_json TEXT,
+                    reason TEXT,
+                    FOREIGN KEY (candidate_id) REFERENCES trade_candidates(id),
+                    FOREIGN KEY (session_id) REFERENCES sessions(id)
+                );
+
+                CREATE INDEX IF NOT EXISTS approvals_created_at
+                    ON approvals(created_at DESC);
                 """
             )
             connection.execute(
@@ -141,6 +166,10 @@ class Storage:
             )
             connection.execute(
                 "INSERT OR IGNORE INTO schema_meta(version, applied_at) VALUES (3, ?)",
+                (utc_now(),),
+            )
+            connection.execute(
+                "INSERT OR IGNORE INTO schema_meta(version, applied_at) VALUES (4, ?)",
                 (utc_now(),),
             )
             connection.execute(
@@ -159,6 +188,12 @@ class Storage:
             ended_at = utc_now()
             connection.execute(
                 "UPDATE sessions SET status = 'INTERRUPTED', ended_at = ? WHERE id = ?",
+                (ended_at, session_id),
+            )
+            connection.execute(
+                "UPDATE approvals SET status = 'CANCELLED', decided_at = ?, "
+                "reason = 'Session interrupted.' WHERE session_id = ? "
+                "AND status IN ('PENDING', 'APPROVED')",
                 (ended_at, session_id),
             )
             self._insert_event(
@@ -227,6 +262,12 @@ class Storage:
             ended_at = utc_now()
             connection.execute(
                 "UPDATE sessions SET status = 'STOPPED', ended_at = ? WHERE id = ?",
+                (ended_at, row["id"]),
+            )
+            connection.execute(
+                "UPDATE approvals SET status = 'CANCELLED', decided_at = ?, "
+                "reason = 'Session stopped.' WHERE session_id = ? "
+                "AND status IN ('PENDING', 'APPROVED')",
                 (ended_at, row["id"]),
             )
             self._insert_event(
@@ -524,6 +565,212 @@ class Storage:
                 (safe_limit,),
             ).fetchall()
         return [json.loads(str(row["candidate_json"])) for row in rows]
+
+    def get_trade_candidate(self, candidate_id: str) -> dict[str, Any] | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT candidate_json FROM trade_candidates WHERE id = ?", (candidate_id,)
+            ).fetchone()
+        return json.loads(str(row["candidate_json"])) if row is not None else None
+
+    @staticmethod
+    def _approval_row(row: sqlite3.Row) -> dict[str, Any]:
+        result = dict(row)
+        result["candidate_snapshot"] = json.loads(result.pop("candidate_json"))
+        for source, target in (("telegram_json", "telegram"), ("recheck_json", "recheck")):
+            raw = result.pop(source)
+            result[target] = json.loads(str(raw)) if raw is not None else None
+        result.pop("callback_digest", None)
+        return result
+
+    def create_approval(
+        self,
+        *,
+        approval_id: str,
+        candidate: Mapping[str, Any],
+        chat_id: int,
+        user_id: int,
+        callback_digest: str,
+        created_at: str,
+        expires_at: str,
+    ) -> dict[str, Any]:
+        candidate_id = str(candidate["candidate_id"])
+        payload = json.dumps(dict(candidate), separators=(",", ":"), sort_keys=True)
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            stored = connection.execute(
+                "SELECT candidate_json, decision, sessions.status AS session_status "
+                "FROM trade_candidates JOIN sessions ON sessions.id = trade_candidates.session_id "
+                "WHERE trade_candidates.id = ?",
+                (candidate_id,),
+            ).fetchone()
+            if (
+                stored is None
+                or stored["decision"] != "ALLOWED"
+                or stored["session_status"] != "RUNNING"
+            ):
+                raise ValueError(
+                    "Candidate is missing, not allowed, or its session is not running."
+                )
+            if str(stored["candidate_json"]) != payload:
+                raise ValueError("Candidate snapshot does not match persisted candidate.")
+            existing = connection.execute(
+                "SELECT * FROM approvals WHERE candidate_id = ?", (candidate_id,)
+            ).fetchone()
+            if existing is not None:
+                connection.commit()
+                return self._approval_row(existing)
+            connection.execute(
+                "INSERT INTO approvals(id, candidate_id, session_id, created_at, expires_at, "
+                "status, chat_id, user_id, callback_digest, candidate_json) "
+                "VALUES (?, ?, ?, ?, ?, 'PENDING', ?, ?, ?, ?)",
+                (
+                    approval_id,
+                    candidate_id,
+                    str(candidate["session_id"]),
+                    created_at,
+                    expires_at,
+                    chat_id,
+                    user_id,
+                    callback_digest,
+                    payload,
+                ),
+            )
+            row = connection.execute(
+                "SELECT * FROM approvals WHERE id = ?", (approval_id,)
+            ).fetchone()
+            connection.commit()
+        assert row is not None
+        return self._approval_row(row)
+
+    def mark_approval_sent(self, approval_id: str, telegram: Mapping[str, Any]) -> dict[str, Any]:
+        payload = json.dumps(dict(telegram), separators=(",", ":"), sort_keys=True)
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute(
+                "UPDATE approvals SET telegram_json = COALESCE(telegram_json, ?) WHERE id = ?",
+                (payload, approval_id),
+            )
+            row = connection.execute(
+                "SELECT * FROM approvals WHERE id = ?", (approval_id,)
+            ).fetchone()
+            connection.commit()
+        if row is None:
+            raise ValueError("Approval is missing.")
+        return self._approval_row(row)
+
+    def consume_approval(
+        self,
+        *,
+        callback_digest: str,
+        chat_id: int,
+        user_id: int,
+        status: str,
+        decided_at: str,
+    ) -> dict[str, Any] | None:
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            cursor = connection.execute(
+                "UPDATE approvals SET status = CASE WHEN expires_at <= ? "
+                "THEN 'EXPIRED' ELSE ? END, "
+                "decided_at = ?, reason = CASE WHEN expires_at <= ? THEN 'Approval TTL expired.' "
+                "ELSE NULL END WHERE callback_digest = ? AND chat_id = ? AND user_id = ? "
+                "AND status = 'PENDING'",
+                (decided_at, status, decided_at, decided_at, callback_digest, chat_id, user_id),
+            )
+            if cursor.rowcount != 1:
+                connection.commit()
+                return None
+            row = connection.execute(
+                "SELECT * FROM approvals WHERE callback_digest = ?", (callback_digest,)
+            ).fetchone()
+            connection.commit()
+        assert row is not None
+        result = self._approval_row(row)
+        return result if result["status"] == status else None
+
+    def expire_approvals(self, now: str) -> int:
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            cursor = connection.execute(
+                "UPDATE approvals SET status = 'EXPIRED', decided_at = ?, "
+                "reason = 'Approval TTL expired.' WHERE status = 'PENDING' AND expires_at <= ?",
+                (now, now),
+            )
+            connection.commit()
+            return int(cursor.rowcount)
+
+    def cancel_pending_approvals(self, *, session_id: str, reason: str, decided_at: str) -> int:
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            cursor = connection.execute(
+                "UPDATE approvals SET status = 'CANCELLED', decided_at = ?, reason = ? "
+                "WHERE session_id = ? AND status = 'PENDING'",
+                (decided_at, reason, session_id),
+            )
+            connection.commit()
+            return int(cursor.rowcount)
+
+    def finish_approval_recheck(
+        self,
+        *,
+        approval_id: str,
+        status: str,
+        reason: str,
+        recheck: Mapping[str, Any],
+        decided_at: str,
+    ) -> dict[str, Any] | None:
+        payload = json.dumps(dict(recheck), separators=(",", ":"), sort_keys=True)
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            cursor = connection.execute(
+                "UPDATE approvals SET status = ?, decided_at = ?, reason = ?, recheck_json = ? "
+                "WHERE id = ? AND status = 'APPROVED' "
+                "AND EXISTS (SELECT 1 FROM sessions WHERE sessions.id = approvals.session_id "
+                "AND sessions.status = 'RUNNING')",
+                (status, decided_at, reason, payload, approval_id),
+            )
+            if cursor.rowcount != 1:
+                connection.commit()
+                return None
+            row = connection.execute(
+                "SELECT * FROM approvals WHERE id = ?", (approval_id,)
+            ).fetchone()
+            if status == "WOULD_EXECUTE":
+                self._insert_event(
+                    connection,
+                    session_id=str(row["session_id"]),
+                    level="INFO",
+                    component="dry_run",
+                    event_type="WOULD_EXECUTE",
+                    message="Approved proposal passed recheck; no financial action was sent.",
+                    details={"approval_id": approval_id, "candidate_id": str(row["candidate_id"])},
+                )
+            connection.commit()
+        assert row is not None
+        return self._approval_row(row)
+
+    def list_approvals(self, limit: int = 100) -> list[dict[str, Any]]:
+        safe_limit = min(max(limit, 1), 500)
+        with self.connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM approvals ORDER BY created_at DESC LIMIT ?", (safe_limit,)
+            ).fetchall()
+        return [self._approval_row(row) for row in rows]
+
+    def get_approval(self, approval_id: str) -> dict[str, Any] | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM approvals WHERE id = ?", (approval_id,)
+            ).fetchone()
+        return self._approval_row(row) if row is not None else None
+
+    def get_approval_for_candidate(self, candidate_id: str) -> dict[str, Any] | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM approvals WHERE candidate_id = ?", (candidate_id,)
+            ).fetchone()
+        return self._approval_row(row) if row is not None else None
 
     def _insert_event(
         self,

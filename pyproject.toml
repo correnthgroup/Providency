@@ -4,12 +4,13 @@ build-backend = "hatchling.build"
 
 [project]
 name = "providency"
-version = "0.4.0"
+version = "0.5.0"
 description = "Local supervised market-observation runtime"
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
 dependencies = [
   "fastapi>=0.116,<1",
+  "keyring>=25.6,<26",
   "numpy>=2.2,<3",
   "opencv-python-headless>=4.12,<5",
   "pillow>=11.3,<12",

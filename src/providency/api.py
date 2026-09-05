@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
 from datetime import UTC, datetime
@@ -8,6 +10,7 @@ from typing import Any, Literal
 from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel
 
+from providency.approvals import ApprovalError, ApprovalService, render_proposal
 from providency.config import Settings
 from providency.context import (
     ConfluenceItem,
@@ -22,6 +25,7 @@ from providency.patterns import Candle, PatternMatcher, PatternPackage
 from providency.risk import RiskPolicy, SessionLimits, build_candidate
 from providency.service import EngineService, PatternAnalysisService
 from providency.storage import Storage
+from providency.telegram import TelegramClient, TelegramClientContract, TelegramError
 from providency.vector import (
     ChartCapture,
     DesiredVectorState,
@@ -92,6 +96,8 @@ def create_app(
     *,
     recover: bool = True,
     vector_adapter: VectorAdapterContract | None = None,
+    telegram_client: TelegramClientContract | None = None,
+    telegram_polling: bool = True,
 ) -> FastAPI:
     resolved = settings or Settings.from_env()
     service = EngineService(Storage(resolved.database_path), recover=recover)
@@ -101,14 +107,35 @@ def create_app(
     )
     analysis = PatternAnalysisService(service.storage, matcher)
     configuration = resolved.trading_configuration
+    telegram_configuration = resolved.telegram
+    telegram = telegram_client or TelegramClient()
+    approvals = ApprovalService(
+        service.storage,
+        chat_id=telegram_configuration.chat_id,
+        user_id=telegram_configuration.user_id,
+        ttl_seconds=telegram_configuration.approval_ttl_seconds,
+    )
+    telegram_offset: int | None = None
+    telegram_poll_error = False
+    stop_polling = asyncio.Event()
     service.storage.record_configuration(configuration.version, configuration.to_dict())
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
-        yield
-        await adapter.stop()
+        task: asyncio.Task[None] | None = None
+        if telegram_polling and not telegram_configuration.missing_fields:
+            task = asyncio.create_task(poll_worker())
+        try:
+            yield
+        finally:
+            stop_polling.set()
+            if task is not None:
+                task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await task
+            await adapter.stop()
 
-    app = FastAPI(title="Providency Core Engine", version="0.4.0", lifespan=lifespan)
+    app = FastAPI(title="Providency Core Engine", version="0.5.0", lifespan=lifespan)
 
     def vector_error(exc: VectorAdapterError) -> HTTPException:
         session = service.storage.running_session()
@@ -458,6 +485,208 @@ def create_app(
             },
         )
         return result
+
+    def recheck_differences(
+        original: dict[str, Any], fresh: dict[str, Any]
+    ) -> list[str]:
+        differences: list[str] = []
+        exact_fields = (
+            "session_id",
+            "symbol",
+            "side",
+            "pattern_id",
+            "pattern_version",
+            "configuration_version",
+            "quantity",
+            "primary_capture_sha256",
+            "context_capture_sha256",
+        )
+        for field in exact_fields:
+            if original.get(field) != fresh.get(field):
+                differences.append(f"{field} changed")
+        price_tolerance = (
+            telegram_configuration.recheck_price_tolerance_ticks * configuration.tick_size
+        )
+        for field in ("entry", "stop"):
+            before = original.get(field)
+            after = fresh.get(field)
+            if before is None or after is None:
+                if before != after:
+                    differences.append(f"{field} changed")
+            elif abs(float(before) - float(after)) > price_tolerance:
+                differences.append(f"{field} changed beyond tolerance")
+        risk_tolerance = (
+            telegram_configuration.recheck_price_tolerance_ticks
+            * configuration.tick_value
+            * configuration.quantity
+        )
+        risk_change = abs(
+            float(original.get("risk_amount", 0)) - float(fresh.get("risk_amount", 0))
+        )
+        if risk_change > risk_tolerance:
+            differences.append("risk_amount changed beyond tolerance")
+        rr_change = abs(
+            float(original.get("reference_rr", 0)) - float(fresh.get("reference_rr", 0))
+        )
+        if rr_change > 1e-9:
+            differences.append("reference_rr changed")
+        if fresh.get("decision") != "ALLOWED":
+            differences.append("fresh risk preflight is blocked")
+        original_configuration = json.dumps(
+            original.get("configuration_snapshot"), separators=(",", ":"), sort_keys=True
+        )
+        fresh_configuration = json.dumps(
+            fresh.get("configuration_snapshot"), separators=(",", ":"), sort_keys=True
+        )
+        if original_configuration != fresh_configuration:
+            differences.append("configuration snapshot changed")
+        return differences
+
+    async def finish_approved_recheck(approval: dict[str, Any]) -> dict[str, Any]:
+        try:
+            capture = await vector_capture_analysis()
+            fresh = candidate_evaluate(
+                CandidateEvaluationPayload(
+                    analysis_capture_id=capture["analysis_capture_id"],
+                    pattern_detection_id=capture["pattern_detection_id"],
+                )
+            )
+            differences = recheck_differences(approval["candidate_snapshot"], fresh)
+            recheck = {
+                "analysis_capture_id": capture["analysis_capture_id"],
+                "pattern_detection_id": capture["pattern_detection_id"],
+                "candidate": fresh,
+                "differences": differences,
+            }
+            return approvals.finish_recheck(
+                str(approval["id"]),
+                passed=not differences,
+                recheck=recheck,
+                reason=(
+                    "Fresh capture and complete preflight match the proposal."
+                    if not differences
+                    else "Recheck cancelled the proposal: " + "; ".join(differences)
+                ),
+            )
+        except Exception as exc:
+            return approvals.finish_recheck(
+                str(approval["id"]),
+                passed=False,
+                recheck={"error_type": type(exc).__name__},
+                reason="Recheck failed closed before any financial action.",
+            )
+
+    async def process_callback(
+        callback_data: str, *, chat_id: int, user_id: int
+    ) -> dict[str, Any]:
+        approval = approvals.consume(callback_data, chat_id=chat_id, user_id=user_id)
+        if approval["status"] == "APPROVED":
+            return await finish_approved_recheck(approval)
+        return approval
+
+    async def poll_once() -> list[dict[str, Any]]:
+        nonlocal telegram_offset
+        batch = await telegram.poll(offset=telegram_offset)
+        telegram_offset = batch.next_offset
+        results: list[dict[str, Any]] = []
+        for callback in batch.callbacks:
+            try:
+                result = await process_callback(
+                    callback.data, chat_id=callback.chat_id, user_id=callback.user_id
+                )
+                results.append(result)
+                await telegram.answer_callback(callback.callback_query_id, str(result["status"]))
+            except ApprovalError:
+                await telegram.answer_callback(callback.callback_query_id, "Rejected")
+        return results
+
+    async def poll_worker() -> None:
+        nonlocal telegram_poll_error
+        while not stop_polling.is_set():
+            approvals.expire()
+            if service.storage.running_session() is None:
+                await asyncio.sleep(1)
+                continue
+            try:
+                await poll_once()
+                if telegram_poll_error:
+                    current = service.storage.running_session()
+                    service.storage.record_event(
+                        session_id=str(current["id"]) if current else None,
+                        level="INFO",
+                        component="telegram",
+                        event_type="TELEGRAM_POLL_RECOVERED",
+                        message="Telegram approval polling recovered.",
+                    )
+                    telegram_poll_error = False
+                await asyncio.sleep(1)
+            except TelegramError:
+                if not telegram_poll_error:
+                    current = service.storage.running_session()
+                    service.storage.record_event(
+                        session_id=str(current["id"]) if current else None,
+                        level="WARNING",
+                        component="telegram",
+                        event_type="TELEGRAM_POLL_FAILED",
+                        message="Telegram polling failed; approvals remain fail-closed.",
+                    )
+                    telegram_poll_error = True
+                await asyncio.sleep(5)
+
+    @app.get("/telegram/status")
+    def telegram_status() -> dict[str, Any]:
+        return {
+            "configuration": telegram_configuration.to_dict(),
+            "polling": telegram_polling and not telegram_configuration.missing_fields,
+            "poll_error": telegram_poll_error,
+        }
+
+    @app.get("/telegram/health")
+    async def telegram_health() -> dict[str, Any]:
+        if telegram_configuration.missing_fields:
+            raise HTTPException(status_code=409, detail="Telegram configuration is incomplete.")
+        try:
+            return await telegram.health_check()
+        except TelegramError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.post("/approvals/{candidate_id}")
+    async def create_approval(candidate_id: str) -> dict[str, Any]:
+        candidate = service.storage.get_trade_candidate(candidate_id)
+        if candidate is None:
+            raise HTTPException(status_code=404, detail="Candidate was not found.")
+        try:
+            created = approvals.create(candidate)
+            if created.approval["status"] != "PENDING":
+                return created.approval
+            if created.approval["telegram"] is not None:
+                return created.approval
+            sent = await telegram.send_proposal(
+                chat_id=telegram_configuration.chat_id,
+                text=render_proposal(created.approval),
+                yes_callback=created.yes_callback,
+                no_callback=created.no_callback,
+            )
+            return service.storage.mark_approval_sent(str(created.approval["id"]), sent)
+        except (ApprovalError, TelegramError, ValueError) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.post("/telegram/poll-once")
+    async def telegram_poll_once() -> list[dict[str, Any]]:
+        try:
+            return await poll_once()
+        except TelegramError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.post("/approvals/expire")
+    def expire_approvals() -> dict[str, int]:
+        return {"expired": approvals.expire()}
+
+    @app.get("/approvals")
+    def list_approvals(
+        limit: int = Query(default=100, ge=1, le=500),
+    ) -> list[dict[str, Any]]:
+        return service.storage.list_approvals(limit)
 
     @app.get("/candidates")
     def candidates(limit: int = Query(default=100, ge=1, le=500)) -> list[dict[str, Any]]:

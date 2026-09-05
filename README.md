@@ -6,7 +6,9 @@ controle Streamlit e launcher single-instance. O `VectorAdapter` abre a Vector
 Web em um perfil persistente do Chromium e produz capturas observacionais. O
 primeiro vertical slice do Pattern Matcher detecta candles tradicionais e
 avalia o pacote `bearish_engulfing`. O preflight de contexto e risco produz
-candidatos locais imutáveis e sempre falha fechado quando falta evidência.
+candidatos locais imutáveis e sempre falha fechado quando falta evidência. O
+incremento 5 envia propostas imutáveis pelo Telegram e, após SIM, só registra
+`WOULD_EXECUTE` depois de uma nova captura e rechecagem completa.
 
 ## Desenvolvimento
 
@@ -68,12 +70,15 @@ Telegram, quantidade na Vector nem qualquer ação financeira.
 
 - Mudanças não financeiras exigem seletores explícitos calibrados para o layout.
 - O detector visual ainda requer calibração com screenshots reais sanitizadas.
-- Nenhuma mensagem Telegram.
+- O bot do Telegram aceita somente botões SIM/NÃO vinculados ao chat e usuário
+  configurados; comandos livres não são processados.
 - Nenhuma ordem financeira.
 - Nenhuma credencial é preenchida ou armazenada pelo Providency.
 
-Segredos e dados operacionais não pertencem ao Git. Use variáveis de ambiente e
-o credential store do sistema nas etapas que introduzirem integrações.
+Segredos e dados operacionais não pertencem ao Git. Grave o token com
+`python -m keyring set Providency telegram-bot-token`; configure apenas chat,
+usuário e TTL pelas variáveis documentadas em `.env.example`. O token não é
+aceito por variável de ambiente, API ou SQLite.
 
 
 O diretório `patterns/` contém os Pattern Packages iniciais e seu contrato de

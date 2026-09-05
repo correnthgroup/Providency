@@ -25,7 +25,11 @@ def api_request(method: str, path: str, payload: dict[str, Any] | None = None) -
     except urllib.error.HTTPError as exc:
         try:
             detail = json.loads(exc.read().decode("utf-8")).get("detail", {})
-            message = detail.get("human_message", "Vector Web is not ready.")
+            message = (
+                detail.get("human_message", "Request was rejected.")
+                if isinstance(detail, dict)
+                else str(detail)
+            )
         except (OSError, ValueError, AttributeError):
             message = "Vector Web is not ready."
         raise RuntimeError(str(message)) from exc
@@ -202,7 +206,7 @@ if analysis:
     st.json({"measures": analysis["measures"]}, expanded=False)
 
 st.subheader("Trade candidates")
-st.caption("Read-only local preflight; no approval or execution is available in this increment.")
+st.caption("ALLOWED candidates can be sent for Telegram approval; only dry-run is available.")
 candidates = api_request("GET", "/candidates?limit=20")
 if not candidates:
     st.info("No candidate has been evaluated yet.")
@@ -227,5 +231,40 @@ else:
                 ),
                 "limits": candidate["limits"],
                 "blocking_reasons": candidate["blocking_reasons"],
+            }
+        )
+        if decision == "ALLOWED" and st.button(
+            "Send immutable Telegram proposal", key=f"proposal-{candidate['candidate_id']}"
+        ):
+            try:
+                proposal = api_request("POST", f"/approvals/{candidate['candidate_id']}")
+                st.success(f"Proposal {proposal['id'][:12]} · {proposal['status']}")
+                st.rerun()
+            except RuntimeError as exc:
+                st.error(str(exc))
+
+st.subheader("Telegram approvals")
+telegram_state = api_request("GET", "/telegram/status")
+telegram_missing = telegram_state["configuration"].get("missing_fields", [])
+if telegram_missing:
+    st.warning("Telegram is blocked until configured: " + ", ".join(telegram_missing))
+else:
+    st.success("Telegram approval polling is configured; the bot token remains masked.")
+st.json(telegram_state, expanded=False)
+
+approvals = api_request("GET", "/approvals?limit=20")
+if not approvals:
+    st.info("No Telegram proposal has been created yet.")
+else:
+    for approval in approvals:
+        st.write(
+            {
+                "approval_id": approval["id"],
+                "candidate_id": approval["candidate_id"],
+                "status": approval["status"],
+                "expires_at": approval["expires_at"],
+                "decided_at": approval["decided_at"],
+                "reason": approval["reason"],
+                "recheck": approval["recheck"],
             }
         )
