@@ -1,0 +1,30 @@
+schema_version: 1
+references:
+  - id: TOU-001
+    type: BOOK
+    title: "Candlestick Charting Explained"
+    author: "Gregory L. Morris"
+    url: "https://books.google.com/books?id=9ixGWeQ_qLkC"
+    accessed_at: "2026-09-04"
+    supports: [definition, confirmation]
+  - id: TOU-002
+    type: EMPIRICAL_REFERENCE
+    title: "Three Outside Up"
+    author: "Thomas N. Bulkowski"
+    url: "https://thepatternsite.com/ThreeOutsideUp.html"
+    accessed_at: "2026-09-04"
+    supports: [definition, statistics, context, limitations]
+  - id: TOU-003
+    type: PROFESSIONAL_ASSOCIATION
+    title: "Learning from the Legend: A note on Steve Nison's session"
+    author: "CMT Association"
+    url: "https://cmtassociation.org/technical_insights/technical-insights-november-2020/"
+    accessed_at: "2026-09-04"
+    supports: [context, confirmation]
+  - id: TOU-004
+    type: SOFTWARE_DOCUMENTATION
+    title: "TA-Lib Pattern Recognition Functions"
+    author: "TA-Lib"
+    url: "https://ta-lib.github.io/ta-lib-python/func_groups/pattern_recognition.html"
+    accessed_at: "2026-09-04"
+    supports: [implementation_reference]

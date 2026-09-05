@@ -1,0 +1,73 @@
+schema_version: 1
+
+id: three_white_soldiers
+display_name_pt: "Tres soldados brancos"
+name_en: "Three White Soldiers"
+family: BULLISH_REVERSAL
+version: "0.1.0"
+
+enabled: false
+research_confidence: HIGH
+
+recognition:
+  input: TRADITIONAL_CANDLESTICKS
+  visual_confidence_min: 0.95
+  context:
+    preceding_candles: 3
+    rules:
+      - {field: CLOSE_SEQUENCE, operator: EQ, value: DESCENDING}
+  sequence:
+    candles: 3
+    rules:
+      - {candle: 0, field: BODY_COLOR, operator: EQ, value: BULLISH}
+      - {candle: 1, field: BODY_COLOR, operator: EQ, value: BULLISH}
+      - {candle: 2, field: BODY_COLOR, operator: EQ, value: BULLISH}
+      - {candle: 0, field: BODY_TO_RANGE, operator: GTE, value: 0.60}
+      - {candle: 1, field: BODY_TO_RANGE, operator: GTE, value: 0.60}
+      - {candle: 2, field: BODY_TO_RANGE, operator: GTE, value: 0.60}
+      - {candle: 0, field: UPPER_WICK_TO_RANGE, operator: LTE, value: 0.15}
+      - {candle: 1, field: UPPER_WICK_TO_RANGE, operator: LTE, value: 0.15}
+      - {candle: 2, field: UPPER_WICK_TO_RANGE, operator: LTE, value: 0.15}
+      - candle: 1
+        field: OPEN
+        operator: BETWEEN_EXCLUSIVE
+        value: {candle: 0, lower_field: OPEN, upper_field: CLOSE}
+      - candle: 2
+        field: OPEN
+        operator: BETWEEN_EXCLUSIVE
+        value: {candle: 1, lower_field: OPEN, upper_field: CLOSE}
+      - candle: 1
+        field: CLOSE
+        operator: GT
+        value: {candle: 0, field: CLOSE}
+      - candle: 2
+        field: CLOSE
+        operator: GT
+        value: {candle: 1, field: CLOSE}
+
+formation:
+  description: "Apos queda previa, tres candles altistas longos abrem dentro do corpo anterior, fecham progressivamente mais alto e perto de suas maximas."
+
+confirmation:
+  mode: BAR_CLOSE
+
+trigger:
+  type: NEXT_BAR_BREAKOUT
+  reference: PATTERN_HIGH
+
+stop:
+  type: PATTERN_LOW
+  buffer_enabled: true
+
+invalidation:
+  rules:
+    - "Fechamento abaixo de PATTERN_LOW."
+    - "Rompimento de PATTERN_LOW antes do gatilho long."
+
+target:
+  reference_rr_min: 2.0
+  reference_rr_max: 3.0
+
+compatible_context_families:
+  - BULLISH_REVERSAL
+  - BULLISH_CONTINUATION

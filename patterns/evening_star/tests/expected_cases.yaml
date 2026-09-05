@@ -1,0 +1,6 @@
+schema_version: 1
+pattern_id: evening_star
+cases:
+  - {id: evening-star-positive-001, file: positive/001.yaml, expected: MATCH, state: CONFIRMED}
+  - {id: evening-star-negative-001, file: negative/001.yaml, expected: NO_MATCH, state: WATCHING}
+  - {id: evening-star-forming-001, file: forming/001.yaml, expected: FORMING, state: FORMING}

@@ -1,0 +1,19 @@
+schema_version: 1
+dataset_version: "0.1.0"
+
+# Registre a procedencia de cada amostra usada nos testes e na melhoria do padrão.
+assets:
+  - file: positive/TODO.webp
+    label: positive
+    symbol: TODO
+    timeframe: TODO
+    source: TODO
+    captured_at: "TODO: YYYY-MM-DD"
+    split: development
+  - file: negative/TODO.webp
+    label: negative
+    symbol: TODO
+    timeframe: TODO
+    source: TODO
+    captured_at: "TODO: YYYY-MM-DD"
+    split: evaluation

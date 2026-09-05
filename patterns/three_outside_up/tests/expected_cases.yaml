@@ -1,0 +1,6 @@
+schema_version: 1
+pattern_id: three_outside_up
+cases:
+  - {id: three-outside-up-positive-001, file: positive/001.yaml, expected: MATCH, state: CONFIRMED}
+  - {id: three-outside-up-negative-001, file: negative/001.yaml, expected: NO_MATCH, state: WATCHING}
+  - {id: three-outside-up-forming-001, file: forming/001.yaml, expected: FORMING, state: FORMING}

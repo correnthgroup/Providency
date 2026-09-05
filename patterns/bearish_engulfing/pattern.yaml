@@ -1,0 +1,64 @@
+schema_version: 1
+
+id: bearish_engulfing
+display_name_pt: "Engolfo de baixa"
+name_en: "Bearish Engulfing"
+family: BEARISH_REVERSAL
+version: "0.1.0"
+
+enabled: true
+research_confidence: VERY_HIGH
+
+recognition:
+  input: TRADITIONAL_CANDLESTICKS
+  visual_confidence_min: 0.95
+  context:
+    preceding_candles: 3
+    rules:
+      - {field: CLOSE_SEQUENCE, operator: EQ, value: ASCENDING}
+  sequence:
+    candles: 2
+    rules:
+      - candle: 0
+        field: BODY_COLOR
+        operator: EQ
+        value: BULLISH
+      - candle: 1
+        field: BODY_COLOR
+        operator: EQ
+        value: BEARISH
+      - candle: 1
+        field: OPEN
+        operator: GT
+        value: {candle: 0, field: CLOSE}
+      - candle: 1
+        field: CLOSE
+        operator: LT
+        value: {candle: 0, field: OPEN}
+
+formation:
+  description: "Apos alta previa, o segundo corpo, baixista, engloba o primeiro corpo, altista; sombras nao participam do engolfo."
+
+confirmation:
+  mode: BAR_CLOSE
+
+trigger:
+  type: NEXT_BAR_BREAKOUT
+  reference: PATTERN_LOW
+
+stop:
+  type: PATTERN_HIGH
+  buffer_enabled: true
+
+invalidation:
+  rules:
+    - "Fechamento acima de PATTERN_HIGH."
+    - "Rompimento de PATTERN_HIGH antes do gatilho short."
+
+target:
+  reference_rr_min: 2.0
+  reference_rr_max: 3.0
+
+compatible_context_families:
+  - BEARISH_REVERSAL
+  - BEARISH_CONTINUATION

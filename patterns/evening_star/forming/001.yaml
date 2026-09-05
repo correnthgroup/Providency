@@ -1,0 +1,5 @@
+preceding_closes: [90, 94, 98]
+candles:
+  - {open: 98, high: 107, low: 97, close: 106}
+  - {open: 108, high: 111, low: 107, close: 109}
+reason: "A terceira vela ainda nao fechou."

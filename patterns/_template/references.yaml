@@ -1,0 +1,11 @@
+schema_version: 1
+references:
+  # Substitua este item por fontes reais antes de sair de RESEARCHED.
+  - id: TODO-001
+    type: TODO
+    title: "TODO: titulo da fonte"
+    author: "TODO"
+    url: "TODO"
+    accessed_at: "TODO: YYYY-MM-DD"
+    supports:
+      - definition

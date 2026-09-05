@@ -1,0 +1,30 @@
+schema_version: 1
+references:
+  - id: ES-001
+    type: BOOK
+    title: "Japanese Candlestick Charting Techniques, 2nd ed."
+    author: "Steve Nison"
+    url: "https://books.google.com/books?id=-gXKAgAAQBAJ&pg=PA66"
+    accessed_at: "2026-09-04"
+    supports: [definition, confirmation]
+  - id: ES-002
+    type: BOOK
+    title: "Candlestick Charting Explained"
+    author: "Gregory L. Morris"
+    url: "https://books.google.com/books?id=9ixGWeQ_qLkC"
+    accessed_at: "2026-09-04"
+    supports: [definition, confirmation]
+  - id: ES-003
+    type: EMPIRICAL_REFERENCE
+    title: "Evening Star"
+    author: "Thomas N. Bulkowski"
+    url: "https://thepatternsite.com/EveningStar.html"
+    accessed_at: "2026-09-04"
+    supports: [definition, statistics, context, limitations]
+  - id: ES-004
+    type: SOFTWARE_DOCUMENTATION
+    title: "TA-Lib Pattern Recognition Functions"
+    author: "TA-Lib"
+    url: "https://ta-lib.github.io/ta-lib-python/func_groups/pattern_recognition.html"
+    accessed_at: "2026-09-04"
+    supports: [implementation_reference]

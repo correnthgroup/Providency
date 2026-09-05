@@ -1,0 +1,37 @@
+schema_version: 1
+references:
+  - id: BE-001
+    type: BOOK
+    title: "Japanese Candlestick Charting Techniques, 2nd ed."
+    author: "Steve Nison"
+    url: "https://books.google.com/books?id=-gXKAgAAQBAJ&pg=PA42"
+    accessed_at: "2026-09-04"
+    supports: [definition, context]
+  - id: BE-002
+    type: EMPIRICAL_REFERENCE
+    title: "Bearish Engulfing"
+    author: "Thomas N. Bulkowski"
+    url: "https://thepatternsite.com/BearEngulfing.html"
+    accessed_at: "2026-09-04"
+    supports: [definition, statistics, limitations]
+  - id: BE-003
+    type: PEER_REVIEWED_ARTICLE
+    title: "Bullish and Bearish Engulfing Japanese Candlestick patterns: A statistical analysis on the S&P 500 index"
+    author: "Adrian Heinz; Mohamed Jamaloodeen; Atul Saxena; Lissa Pollacia"
+    url: "https://doi.org/10.1016/j.qref.2020.06.006"
+    accessed_at: "2026-09-04"
+    supports: [statistics, limitations]
+  - id: BE-004
+    type: PROFESSIONAL_ASSOCIATION
+    title: "Learning from the Legend: A note on Steve Nison's session"
+    author: "CMT Association"
+    url: "https://cmtassociation.org/technical_insights/technical-insights-november-2020/"
+    accessed_at: "2026-09-04"
+    supports: [context, confirmation]
+  - id: BE-005
+    type: SOFTWARE_DOCUMENTATION
+    title: "TA-Lib Pattern Recognition Functions"
+    author: "TA-Lib"
+    url: "https://ta-lib.github.io/ta-lib-python/func_groups/pattern_recognition.html"
+    accessed_at: "2026-09-04"
+    supports: [implementation_reference]

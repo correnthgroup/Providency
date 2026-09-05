@@ -1,0 +1,6 @@
+schema_version: 1
+dataset_version: "0.1.0"
+assets:
+  - {file: positive/001.yaml, label: positive, symbol: SYNTHETIC, timeframe: TEST, source: canonical_rule_fixture, captured_at: "2026-09-04", split: development}
+  - {file: negative/001.yaml, label: negative, symbol: SYNTHETIC, timeframe: TEST, source: boundary_rule_fixture, captured_at: "2026-09-04", split: development}
+  - {file: forming/001.yaml, label: forming, symbol: SYNTHETIC, timeframe: TEST, source: partial_sequence_fixture, captured_at: "2026-09-04", split: development}

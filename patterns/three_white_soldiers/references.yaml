@@ -1,0 +1,30 @@
+schema_version: 1
+references:
+  - id: TWS-001
+    type: BOOK
+    title: "Japanese Candlestick Charting Techniques, 2nd ed."
+    author: "Steve Nison"
+    url: "https://books.google.com/books?id=-gXKAgAAQBAJ"
+    accessed_at: "2026-09-04"
+    supports: [definition, context]
+  - id: TWS-002
+    type: BOOK
+    title: "Candlestick Charting Explained"
+    author: "Gregory L. Morris"
+    url: "https://books.google.com/books?id=9ixGWeQ_qLkC"
+    accessed_at: "2026-09-04"
+    supports: [definition]
+  - id: TWS-003
+    type: EMPIRICAL_REFERENCE
+    title: "Three White Soldiers"
+    author: "Thomas N. Bulkowski"
+    url: "https://thepatternsite.com/ThreeWhiteSoldiers.html"
+    accessed_at: "2026-09-04"
+    supports: [definition, statistics, context, limitations]
+  - id: TWS-004
+    type: SOFTWARE_DOCUMENTATION
+    title: "TA-Lib Pattern Recognition Functions"
+    author: "TA-Lib"
+    url: "https://ta-lib.github.io/ta-lib-python/func_groups/pattern_recognition.html"
+    accessed_at: "2026-09-04"
+    supports: [implementation_reference]

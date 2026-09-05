@@ -1,0 +1,15 @@
+schema_version: 1
+pattern_id: bearish_engulfing
+cases:
+  - id: bearish-engulfing-positive-001
+    file: positive/001.yaml
+    expected: MATCH
+    state: CONFIRMED
+  - id: bearish-engulfing-negative-001
+    file: negative/001.yaml
+    expected: NO_MATCH
+    state: WATCHING
+  - id: bearish-engulfing-forming-001
+    file: forming/001.yaml
+    expected: FORMING
+    state: FORMING

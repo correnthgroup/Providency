@@ -1,0 +1,17 @@
+schema_version: 1
+pattern_id: replace_with_pattern_id
+
+# Use caminhos relativos ao diretorio do pacote.
+cases:
+  - id: TODO-positive-001
+    file: positive/TODO.webp
+    expected: MATCH
+    state: CONFIRMED
+  - id: TODO-negative-001
+    file: negative/TODO.webp
+    expected: NO_MATCH
+    state: WATCHING
+  - id: TODO-forming-001
+    file: forming/TODO.webp
+    expected: FORMING
+    state: FORMING

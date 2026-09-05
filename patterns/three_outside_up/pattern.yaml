@@ -1,0 +1,62 @@
+schema_version: 1
+
+id: three_outside_up
+display_name_pt: "Tres externos de alta"
+name_en: "Three Outside Up"
+family: BULLISH_REVERSAL
+version: "0.1.0"
+
+enabled: false
+research_confidence: HIGH
+
+recognition:
+  input: TRADITIONAL_CANDLESTICKS
+  visual_confidence_min: 0.95
+  context:
+    preceding_candles: 3
+    rules:
+      - {field: CLOSE_SEQUENCE, operator: EQ, value: DESCENDING}
+  sequence:
+    candles: 3
+    rules:
+      - {candle: 0, field: BODY_COLOR, operator: EQ, value: BEARISH}
+      - {candle: 1, field: BODY_COLOR, operator: EQ, value: BULLISH}
+      - candle: 1
+        field: OPEN
+        operator: LT
+        value: {candle: 0, field: CLOSE}
+      - candle: 1
+        field: CLOSE
+        operator: GT
+        value: {candle: 0, field: OPEN}
+      - candle: 2
+        field: CLOSE
+        operator: GT
+        value: {candle: 1, field: CLOSE}
+
+formation:
+  description: "Apos queda previa, um candle altista engloba o corpo do candle baixista anterior; a terceira vela fecha acima do fechamento do engolfo."
+
+confirmation:
+  mode: BAR_CLOSE
+
+trigger:
+  type: NEXT_BAR_BREAKOUT
+  reference: PATTERN_HIGH
+
+stop:
+  type: PATTERN_LOW
+  buffer_enabled: true
+
+invalidation:
+  rules:
+    - "Fechamento abaixo de PATTERN_LOW."
+    - "Rompimento de PATTERN_LOW antes do gatilho long."
+
+target:
+  reference_rr_min: 2.0
+  reference_rr_max: 3.0
+
+compatible_context_families:
+  - BULLISH_REVERSAL
+  - BULLISH_CONTINUATION

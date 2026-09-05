@@ -1,0 +1,6 @@
+preceding_closes: [110, 106, 102]
+candles:
+  - {open: 102, high: 103, low: 93, close: 94}
+  - {open: 92, high: 93, low: 89, close: 91}
+  - {open: 93, high: 97, low: 92, close: 96}
+reason: "A terceira vela nao fecha acima do ponto medio 98 do primeiro corpo."

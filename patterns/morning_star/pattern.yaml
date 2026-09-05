@@ -1,0 +1,71 @@
+schema_version: 1
+
+id: morning_star
+display_name_pt: "Estrela da manha"
+name_en: "Morning Star"
+family: BULLISH_REVERSAL
+version: "0.1.0"
+
+enabled: false
+research_confidence: HIGH
+
+recognition:
+  input: TRADITIONAL_CANDLESTICKS
+  visual_confidence_min: 0.95
+  context:
+    preceding_candles: 3
+    rules:
+      - {field: CLOSE_SEQUENCE, operator: EQ, value: DESCENDING}
+  sequence:
+    candles: 3
+    rules:
+      - candle: 0
+        field: BODY_COLOR
+        operator: EQ
+        value: BEARISH
+      - {candle: 0, field: BODY_TO_RANGE, operator: GTE, value: 0.60}
+      - {candle: 1, field: BODY_TO_RANGE, operator: LTE, value: 0.30}
+      - candle: 1
+        field: BODY_HIGH
+        operator: LT
+        value: {candle: 0, field: BODY_LOW}
+      - candle: 2
+        field: BODY_COLOR
+        operator: EQ
+        value: BULLISH
+      - {candle: 2, field: BODY_TO_RANGE, operator: GTE, value: 0.60}
+      - candle: 2
+        field: BODY_LOW
+        operator: GT
+        value: {candle: 1, field: BODY_HIGH}
+      - candle: 2
+        field: CLOSE
+        operator: GT
+        value: {candle: 0, field: BODY_MIDPOINT}
+
+formation:
+  description: "Apos queda previa, candle longo de baixa, star pequena com gap de corpo para baixo e candle longo de alta com gap de corpo para cima, fechando alem da metade do primeiro corpo."
+
+confirmation:
+  mode: BAR_CLOSE
+
+trigger:
+  type: NEXT_BAR_BREAKOUT
+  reference: PATTERN_HIGH
+
+stop:
+  type: PATTERN_LOW
+  buffer_enabled: true
+
+invalidation:
+  rules:
+    - "Fechamento abaixo de PATTERN_LOW."
+    - "Rompimento de PATTERN_LOW antes do gatilho long."
+
+target:
+  reference_rr_min: 2.0
+  reference_rr_max: 3.0
+
+compatible_context_families:
+  - BULLISH_REVERSAL
+  - BULLISH_CONTINUATION

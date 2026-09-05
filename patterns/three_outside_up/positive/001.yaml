@@ -1,0 +1,5 @@
+preceding_closes: [110, 106, 102]
+candles:
+  - {open: 102, high: 103, low: 97, close: 98}
+  - {open: 97, high: 105, low: 96, close: 104}
+  - {open: 103, high: 108, low: 102, close: 107}

@@ -1,0 +1,50 @@
+schema_version: 1
+
+# Identidade do pacote. O id deve ser estavel e usar snake_case.
+id: replace_with_pattern_id
+display_name_pt: "TODO: nome em portugues"
+name_en: "TODO: English name"
+family: TODO_FAMILY
+version: "0.1.0"
+
+# O template não entra no catálogo; ao copiar, decida explicitamente a ativação.
+enabled: false
+research_confidence: LOW
+
+recognition:
+  input: TRADITIONAL_CANDLESTICKS
+  visual_confidence_min: 0.95
+  sequence:
+    candles: 1
+    # candle: 0 e o mais antigo; o ultimo e o mais recente.
+    rules:
+      - candle: 0
+        field: TODO_FIELD
+        operator: TODO_OPERATOR
+        value: TODO_VALUE
+
+  geometry:
+    # Remova o bloco se o padrao nao usar estas medidas.
+    body_to_range_max: null
+    lower_wick_to_body_min: null
+    upper_wick_to_range_max: null
+
+formation:
+  description: "TODO: como o padrao se forma antes da confirmacao"
+
+confirmation:
+  mode: BAR_CLOSE
+
+trigger:
+  type: TODO_TRIGGER_TYPE
+  reference: TODO_REFERENCE
+
+stop:
+  type: TODO_STOP_TYPE
+  buffer_enabled: true
+
+invalidation:
+  rules:
+    - TODO: "descrever o que invalida o padrao"
+
+compatible_context_families: []

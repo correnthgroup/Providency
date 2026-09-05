@@ -1,0 +1,6 @@
+schema_version: 1
+pattern_id: three_black_crows
+cases:
+  - {id: three-black-crows-positive-001, file: positive/001.yaml, expected: MATCH, state: CONFIRMED}
+  - {id: three-black-crows-negative-001, file: negative/001.yaml, expected: NO_MATCH, state: WATCHING}
+  - {id: three-black-crows-forming-001, file: forming/001.yaml, expected: FORMING, state: FORMING}

@@ -1,0 +1,65 @@
+schema_version: 1
+
+id: evening_star
+display_name_pt: "Estrela da tarde"
+name_en: "Evening Star"
+family: BEARISH_REVERSAL
+version: "0.1.0"
+
+enabled: false
+research_confidence: HIGH
+
+recognition:
+  input: TRADITIONAL_CANDLESTICKS
+  visual_confidence_min: 0.95
+  context:
+    preceding_candles: 3
+    rules:
+      - {field: CLOSE_SEQUENCE, operator: EQ, value: ASCENDING}
+  sequence:
+    candles: 3
+    rules:
+      - {candle: 0, field: BODY_COLOR, operator: EQ, value: BULLISH}
+      - {candle: 0, field: BODY_TO_RANGE, operator: GTE, value: 0.60}
+      - {candle: 1, field: BODY_TO_RANGE, operator: LTE, value: 0.30}
+      - candle: 1
+        field: BODY_LOW
+        operator: GT
+        value: {candle: 0, field: BODY_HIGH}
+      - {candle: 2, field: BODY_COLOR, operator: EQ, value: BEARISH}
+      - {candle: 2, field: BODY_TO_RANGE, operator: GTE, value: 0.60}
+      - candle: 2
+        field: BODY_HIGH
+        operator: LT
+        value: {candle: 1, field: BODY_LOW}
+      - candle: 2
+        field: CLOSE
+        operator: LT
+        value: {candle: 0, field: BODY_MIDPOINT}
+
+formation:
+  description: "Apos alta previa, candle longo de alta, star pequena com gap de corpo para cima e candle longo de baixa com gap de corpo para baixo, fechando alem da metade do primeiro corpo."
+
+confirmation:
+  mode: BAR_CLOSE
+
+trigger:
+  type: NEXT_BAR_BREAKOUT
+  reference: PATTERN_LOW
+
+stop:
+  type: PATTERN_HIGH
+  buffer_enabled: true
+
+invalidation:
+  rules:
+    - "Fechamento acima de PATTERN_HIGH."
+    - "Rompimento de PATTERN_HIGH antes do gatilho short."
+
+target:
+  reference_rr_min: 2.0
+  reference_rr_max: 3.0
+
+compatible_context_families:
+  - BEARISH_REVERSAL
+  - BEARISH_CONTINUATION
