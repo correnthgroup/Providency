@@ -180,6 +180,28 @@ class Storage:
             events.append(event)
         return events
 
+    def record_event(
+        self,
+        *,
+        session_id: str | None,
+        level: str,
+        component: str,
+        event_type: str,
+        message: str,
+        details: Mapping[str, Any] | None = None,
+    ) -> None:
+        with self.connect() as connection:
+            self._insert_event(
+                connection,
+                session_id=session_id,
+                level=level,
+                component=component,
+                event_type=event_type,
+                message=message,
+                details=details,
+            )
+            connection.commit()
+
     def _insert_event(
         self,
         connection: sqlite3.Connection,

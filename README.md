@@ -1,8 +1,9 @@
 # Providency
 
-Aplicativo local para observação visual supervisionada de mercado. O primeiro
-incremento fornece o Core Engine local, persistência SQLite, sessões, eventos,
-API FastAPI, controle Streamlit e launcher single-instance.
+Aplicativo local para observação visual supervisionada de mercado. O runtime
+fornece Core Engine local, persistência SQLite, sessões, eventos, API FastAPI,
+controle Streamlit e launcher single-instance. O `VectorAdapter` abre a Vector
+Web em um perfil persistente do Chromium e produz capturas observacionais.
 
 ## Desenvolvimento
 
@@ -13,6 +14,7 @@ Requisitos:
 
 ```powershell
 uv sync --dev
+uv run playwright install chromium
 uv run pytest
 uv run ruff check .
 uv run providency-launcher
@@ -21,12 +23,26 @@ uv run providency-launcher
 O launcher inicia o Core Engine e a UI. O estado inicial é `STOPPED`; uma sessão
 operacional só começa após `RUN`.
 
+## Captura da Vector Web
+
+Defina `PROVIDENCY_VECTOR_URL` no ambiente. Abra a Vector pela UI, conclua o
+login manualmente e mantenha o gráfico primário visível. Como a Vector Web não
+oferece um contrato público de DOM, os seletores ficam centralizados nas
+variáveis `PROVIDENCY_VECTOR_*_SELECTOR` documentadas em `.env.example` e devem
+ser calibrados para o layout observado.
+
+Perfil, screenshots WebP e metadados operacionais ficam sob
+`PROVIDENCY_DATA_DIR`, fora do Git. A captura retorna `NO_DECISION` se detectar
+login, carregamento, modal sobre o gráfico, área pequena/ausente, múltiplos
+gráficos candidatos, ativo ilegível ou timeframe ilegível. A URL configurada
+deve ser HTTPS.
+
 ## Limites atuais
 
-- Nenhum acesso à Vector Web.
+- O adapter apenas abre e captura a Vector Web; não altera símbolo ou timeframe.
 - Nenhuma mensagem Telegram.
 - Nenhuma ordem financeira.
-- Somente estado local e fluxo de controle do Incremento 1.
+- Nenhuma credencial é preenchida ou armazenada pelo Providency.
 
 Segredos e dados operacionais não pertencem ao Git. Use variáveis de ambiente e
 o credential store do sistema nas etapas que introduzirem integrações.

@@ -16,6 +16,13 @@ def api_request(method: str, path: str) -> Any:
     try:
         with urllib.request.urlopen(request, timeout=2) as response:
             return json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        try:
+            detail = json.loads(exc.read().decode("utf-8")).get("detail", {})
+            message = detail.get("human_message", "Vector Web is not ready.")
+        except (OSError, ValueError, AttributeError):
+            message = "Vector Web is not ready."
+        raise RuntimeError(str(message)) from exc
     except (OSError, ValueError, urllib.error.URLError) as exc:
         raise RuntimeError("Core Engine is unavailable.") from exc
 
@@ -58,3 +65,30 @@ else:
             f"{event['created_at']}  {event['level']:<7}  "
             f"{event['component']:<10}  {event['message']}"
         )
+
+st.subheader("Vector Web")
+vector_health = api_request("GET", "/vector/health")
+st.caption(f"Browser profile: {vector_health['state']}")
+open_column, capture_column = st.columns(2)
+with open_column:
+    if st.button("Open Vector", use_container_width=True):
+        try:
+            api_request("POST", "/vector/open")
+            st.info("Complete login manually in the Vector Web window.")
+        except RuntimeError as exc:
+            st.error(str(exc))
+with capture_column:
+    if st.button(
+        "Capture primary chart",
+        disabled=vector_health["state"] != "OPEN",
+        use_container_width=True,
+    ):
+        try:
+            capture = api_request("POST", "/vector/capture")
+            if capture["disposition"] == "USABLE":
+                st.success(f"{capture['symbol']} · {capture['timeframe']} · usable")
+                st.image(capture["path"], caption=f"SHA-256 {capture['sha256']}")
+            else:
+                st.warning(f"No decision: {capture['issue']}")
+        except RuntimeError as exc:
+            st.error(str(exc))

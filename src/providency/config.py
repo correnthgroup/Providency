@@ -13,6 +13,7 @@ class Settings:
     api_host: str = "127.0.0.1"
     api_port: int = 8765
     ui_port: int = 8501
+    vector_url: str = ""
 
     @property
     def database_path(self) -> Path:
@@ -21,6 +22,14 @@ class Settings:
     @property
     def lock_path(self) -> Path:
         return self.data_dir / "providency.lock"
+
+    @property
+    def vector_profile_dir(self) -> Path:
+        return self.data_dir / "vector-profile"
+
+    @property
+    def capture_dir(self) -> Path:
+        return self.data_dir / "captures"
 
     @property
     def api_url(self) -> str:
@@ -39,4 +48,5 @@ class Settings:
             api_host=os.getenv("PROVIDENCY_API_HOST", "127.0.0.1"),
             api_port=int(os.getenv("PROVIDENCY_API_PORT", "8765")),
             ui_port=int(os.getenv("PROVIDENCY_UI_PORT", "8501")),
+            vector_url=os.getenv("PROVIDENCY_VECTOR_URL", "").strip(),
         )

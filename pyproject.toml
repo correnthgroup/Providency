@@ -4,12 +4,14 @@ build-backend = "hatchling.build"
 
 [project]
 name = "providency"
-version = "0.1.0"
+version = "0.2.0"
 description = "Local supervised market-observation runtime"
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
 dependencies = [
   "fastapi>=0.116,<1",
+  "pillow>=11.3,<12",
+  "playwright>=1.55,<2",
   "platformdirs>=4.3,<5",
   "pydantic>=2.11,<3",
   "streamlit>=1.48,<2",
@@ -25,6 +27,7 @@ dev = [
   "httpx>=0.28,<1",
   "mypy>=1.17,<2",
   "pytest>=8.4,<9",
+  "pytest-asyncio>=1.1,<2",
   "ruff>=0.12,<1",
 ]
 
