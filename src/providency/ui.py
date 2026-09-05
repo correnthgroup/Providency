@@ -68,11 +68,16 @@ if session:
 st.subheader("Analysis configuration")
 configuration_state = api_request("GET", "/configuration")
 desired = configuration_state["desired"]
+execution_state = api_request("GET", "/execution/status")
+execution_mode = execution_state["mode"]
+if execution_mode == "DEMO":
+    st.warning("DEMO EXECUTION ENABLED — only the positively verified demo account may be used.")
+else:
+    st.info("DRY_RUN is active; no order action can reach Vector Web.")
 missing = desired.get("missing_fields", [])
 if missing:
     st.warning(
-        "Candidate evaluation is blocked until these fields are configured: "
-        + ", ".join(missing)
+        "Candidate evaluation is blocked until these fields are configured: " + ", ".join(missing)
     )
 else:
     st.success(f"Configuration {desired['version']} is complete.")
@@ -206,7 +211,10 @@ if analysis:
     st.json({"measures": analysis["measures"]}, expanded=False)
 
 st.subheader("Trade candidates")
-st.caption("ALLOWED candidates can be sent for Telegram approval; only dry-run is available.")
+st.caption(
+    "ALLOWED candidates can be sent for Telegram approval; the configured mode is "
+    f"{execution_mode}."
+)
 candidates = api_request("GET", "/candidates?limit=20")
 if not candidates:
     st.info("No candidate has been evaluated yet.")
@@ -243,6 +251,31 @@ else:
             except RuntimeError as exc:
                 st.error(str(exc))
 
+st.subheader("Demo operations")
+operations = api_request("GET", "/operations?limit=20")
+if not operations:
+    st.info("No persisted demo operation exists.")
+else:
+    for operation in operations:
+        status = operation["status"]
+        if status == "FILLED":
+            st.success(f"{operation['operation_id'][:12]} · {status}")
+        elif status in {"PENDING", "PARTIAL", "SUBMITTED_UNCONFIRMED"}:
+            st.warning(f"{operation['operation_id'][:12]} · {status}")
+        else:
+            st.error(f"{operation['operation_id'][:12]} · {status}")
+        st.json(
+            {
+                "account": (operation.get("reconciliation") or {}).get("account"),
+                "symbol": operation["symbol"],
+                "side": operation["side"],
+                "quantity": operation["quantity"],
+                "reason": operation["reason"],
+                "order": (operation.get("reconciliation") or {}).get("order"),
+                "position": (operation.get("reconciliation") or {}).get("position"),
+            },
+            expanded=False,
+        )
 st.subheader("Telegram approvals")
 telegram_state = api_request("GET", "/telegram/status")
 telegram_missing = telegram_state["configuration"].get("missing_fields", [])

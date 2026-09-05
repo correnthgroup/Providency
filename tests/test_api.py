@@ -6,16 +6,24 @@ from fastapi.testclient import TestClient
 from synthetic_chart import bearish_engulfing_chart
 
 from providency.api import create_app
-from providency.config import AnalysisConfiguration, Settings, TelegramConfiguration
+from providency.config import AnalysisConfiguration, ExecutionMode, Settings, TelegramConfiguration
 from providency.context import ConfluenceItem, ConfluenceResult, ConfluenceStatus, PriceAnchor
 from providency.telegram import TelegramCallback, TelegramPollBatch
 from providency.vector import (
+    AccountEnvironment,
     AppliedVectorState,
     CaptureDisposition,
     CaptureRegion,
     ChartCapture,
+    DemoAccountState,
+    DemoExecutionResult,
     DesiredVectorState,
+    OrderState,
+    OrderStateObservation,
+    PositionState,
+    PositionStateObservation,
     StateSyncResult,
+    TradeSide,
 )
 
 ROOT = Path(__file__).parents[1]
@@ -34,6 +42,8 @@ class FakeVectorAdapter:
         self.capture_path = capture_path
         self.stopped = False
         self.sha256 = "a" * 64
+        self.demo_states: list[DemoAccountState] = []
+        self.demo_submit_calls = 0
 
     async def health_check(self) -> dict[str, str]:
         return {"state": "OPEN"}
@@ -84,6 +94,31 @@ class FakeVectorAdapter:
         )
         return primary, context, StateSyncResult(desired, applied, applied)
 
+    async def observe_demo_state(self) -> DemoAccountState:
+        return self.demo_states[0]
+
+    async def prepare_demo_order(self, quantity: int) -> DemoExecutionResult:
+        pre = self.demo_states.pop(0)
+        post = self.demo_states[0]
+        assert post.quantity == quantity
+        return DemoExecutionResult(pre, post, "SET_QUANTITY")
+
+    async def select_demo_account(self) -> DemoExecutionResult:
+        pre = self.demo_states.pop(0)
+        post = self.demo_states[0]
+        return DemoExecutionResult(pre, post, "SELECT_DEMO_ACCOUNT")
+
+    async def submit_demo_order(
+        self, side: TradeSide, *, symbol: str, quantity: int
+    ) -> DemoExecutionResult:
+        self.demo_submit_calls += 1
+        pre = self.demo_states.pop(0)
+        post = self.demo_states[0]
+        assert side is TradeSide.SELL
+        assert symbol == "BTC/BRL"
+        assert quantity == 2
+        return DemoExecutionResult(pre, post, side.value)
+
     async def stop(self) -> None:
         self.stopped = True
 
@@ -102,7 +137,7 @@ class FakeTelegramClient:
         self, *, chat_id: int, text: str, yes_callback: str, no_callback: str
     ) -> dict[str, int]:
         assert chat_id == 10
-        assert "WOULD_EXECUTE" in text
+        assert "WOULD_EXECUTE" in text or "one demo submission" in text
         self.yes_callback = yes_callback
         self.no_callback = no_callback
         return {"message_id": 7, "chat_id": chat_id}
@@ -137,6 +172,22 @@ def all_context_checks_pass(**_: object) -> ConfluenceResult:
             "support_resistance": passed,
             "context_timeframe": passed,
         }
+    )
+
+
+def demo_state(
+    *, order: OrderState = OrderState.NONE, position: PositionState = PositionState.FLAT
+) -> DemoAccountState:
+    return DemoAccountState(
+        account=AccountEnvironment.DEMO,
+        symbol="BTC/BRL",
+        quantity=2,
+        order=OrderStateObservation(
+            order, "vector-1" if order is not OrderState.NONE else None, 2, 2
+        ),
+        position=PositionStateObservation(
+            position, 0 if position is PositionState.FLAT else 2, 100.0
+        ),
     )
 
 
@@ -379,3 +430,68 @@ def test_approved_proposal_is_cancelled_when_market_capture_changes(
 
         assert result["status"] == "CANCELLED"
         assert "primary_capture_sha256 changed" in result["reason"]
+
+
+def test_demo_mode_executes_one_rechecked_operation_and_exposes_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("providency.api.analyze_context", all_context_checks_pass)
+    configuration = AnalysisConfiguration(
+        symbol="BTC/BRL",
+        primary_timeframe="15min",
+        context_timeframe="1h",
+        short_ma_period=7,
+        long_ma_period=70,
+        quantity=2,
+        tick_size=0.5,
+        tick_value=1.0,
+        max_trades=3,
+        max_consecutive_losses=2,
+        max_session_loss=100,
+        support_resistance_tolerance=5,
+    )
+    configured = replace(
+        settings(tmp_path, configuration),
+        telegram_configuration=TelegramConfiguration(chat_id=10, user_id=20),
+        execution_mode=ExecutionMode.DEMO,
+    )
+    adapter = FakeVectorAdapter(tmp_path / "capture.webp")
+    bearish_engulfing_chart(adapter.capture_path)
+    adapter.demo_states = [
+        demo_state(),
+        demo_state(),
+        demo_state(),
+        demo_state(position=PositionState.SHORT, order=OrderState.FILLED),
+    ]
+    telegram = FakeTelegramClient()
+    app = create_app(
+        configured,
+        recover=False,
+        vector_adapter=adapter,
+        telegram_client=telegram,
+        telegram_polling=False,
+    )
+
+    with TestClient(app) as client:
+        client.post("/run")
+        captured = client.post("/vector/capture-analysis").json()
+        candidate = client.post(
+            "/candidate/evaluate",
+            json={
+                "analysis_capture_id": captured["analysis_capture_id"],
+                "pattern_detection_id": captured["pattern_detection_id"],
+            },
+        ).json()
+        client.post(f"/approvals/{candidate['candidate_id']}")
+        telegram.queue(telegram.yes_callback, chat_id=10, user_id=20)
+
+        operation = client.post("/telegram/poll-once").json()[0]
+
+        assert operation["status"] == "FILLED"
+        assert operation["side"] == "SELL"
+        assert client.get("/execution/status").json()["mode"] == "DEMO"
+        assert client.get("/operations").json()[0]["operation_id"] == operation["operation_id"]
+        assert adapter.demo_submit_calls == 1
+        assert "WOULD_EXECUTE" not in [
+            event["event_type"] for event in client.get("/events").json()
+        ]

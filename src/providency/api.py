@@ -11,7 +11,7 @@ from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel
 
 from providency.approvals import ApprovalError, ApprovalService, render_proposal
-from providency.config import Settings
+from providency.config import ExecutionMode, Settings
 from providency.context import (
     ConfluenceItem,
     ConfluenceResult,
@@ -21,6 +21,7 @@ from providency.context import (
     PriceScaleError,
     analyze_context,
 )
+from providency.execution import DemoExecutionService
 from providency.patterns import Candle, PatternMatcher, PatternPackage
 from providency.risk import RiskPolicy, SessionLimits, build_candidate
 from providency.service import EngineService, PatternAnalysisService
@@ -114,7 +115,9 @@ def create_app(
         chat_id=telegram_configuration.chat_id,
         user_id=telegram_configuration.user_id,
         ttl_seconds=telegram_configuration.approval_ttl_seconds,
+        dry_run=resolved.execution_mode is ExecutionMode.DRY_RUN,
     )
+    execution = DemoExecutionService(service.storage, adapter, mode=resolved.execution_mode)
     telegram_offset: int | None = None
     telegram_poll_error = False
     stop_polling = asyncio.Event()
@@ -135,7 +138,7 @@ def create_app(
                     await task
             await adapter.stop()
 
-    app = FastAPI(title="Providency Core Engine", version="0.5.0", lifespan=lifespan)
+    app = FastAPI(title="Providency Core Engine", version="0.6.0", lifespan=lifespan)
 
     def vector_error(exc: VectorAdapterError) -> HTTPException:
         session = service.storage.running_session()
@@ -167,8 +170,13 @@ def create_app(
         return service.snapshot()
 
     @app.post("/run", response_model=SessionPayload)
-    def run() -> dict[str, Any]:
-        return service.run()
+    async def run() -> dict[str, Any]:
+        session = service.run()
+        if resolved.execution_mode is ExecutionMode.DEMO:
+            health = await adapter.health_check()
+            if health.get("state") == "OPEN":
+                await execution.reconcile_open_operations()
+        return session
 
     @app.post("/stop", response_model=SessionPayload | None)
     def stop() -> dict[str, Any] | None:
@@ -183,7 +191,27 @@ def create_app(
         return {
             "desired": configuration.to_dict(),
             "applied": service.storage.latest_applied_state(),
+            "execution_mode": resolved.execution_mode.value,
         }
+
+    @app.get("/execution/status")
+    def execution_status() -> dict[str, Any]:
+        return {
+            "mode": resolved.execution_mode.value,
+            "demo_only": True,
+            "blocking_operation": service.storage.has_blocking_operation(),
+            "latest": service.storage.list_operations(1),
+        }
+
+    @app.get("/operations")
+    def operations(limit: int = Query(default=100, ge=1, le=500)) -> list[dict[str, Any]]:
+        return service.storage.list_operations(limit)
+
+    @app.post("/operations/reconcile")
+    async def reconcile_operations() -> list[dict[str, Any]]:
+        if resolved.execution_mode is not ExecutionMode.DEMO:
+            raise HTTPException(status_code=409, detail="Demo execution is not enabled.")
+        return await execution.reconcile_open_operations()
 
     @app.get("/vector/health")
     async def vector_health() -> dict[str, str]:
@@ -558,16 +586,6 @@ def create_app(
                 "candidate": fresh,
                 "differences": differences,
             }
-            return approvals.finish_recheck(
-                str(approval["id"]),
-                passed=not differences,
-                recheck=recheck,
-                reason=(
-                    "Fresh capture and complete preflight match the proposal."
-                    if not differences
-                    else "Recheck cancelled the proposal: " + "; ".join(differences)
-                ),
-            )
         except Exception as exc:
             return approvals.finish_recheck(
                 str(approval["id"]),
@@ -575,6 +593,22 @@ def create_app(
                 recheck={"error_type": type(exc).__name__},
                 reason="Recheck failed closed before any financial action.",
             )
+        finished = approvals.finish_recheck(
+            str(approval["id"]),
+            passed=not differences,
+            recheck=recheck,
+            reason=(
+                "Fresh capture and complete preflight match the proposal."
+                if not differences
+                else "Recheck cancelled the proposal: " + "; ".join(differences)
+            ),
+        )
+        if (
+            resolved.execution_mode is ExecutionMode.DEMO
+            and finished["status"] == "WOULD_EXECUTE"
+        ):
+            return await execution.execute_approved(finished)
+        return finished
 
     async def process_callback(
         callback_data: str, *, chat_id: int, user_id: int
@@ -663,7 +697,7 @@ def create_app(
                 return created.approval
             sent = await telegram.send_proposal(
                 chat_id=telegram_configuration.chat_id,
-                text=render_proposal(created.approval),
+                text=render_proposal(created.approval, resolved.execution_mode.value),
                 yes_callback=created.yes_callback,
                 no_callback=created.no_callback,
             )

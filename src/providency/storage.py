@@ -154,6 +154,42 @@ class Storage:
 
                 CREATE INDEX IF NOT EXISTS approvals_created_at
                     ON approvals(created_at DESC);
+
+                CREATE TABLE IF NOT EXISTS operations (
+                    id TEXT PRIMARY KEY,
+                    approval_id TEXT NOT NULL UNIQUE,
+                    candidate_id TEXT NOT NULL UNIQUE,
+                    session_id TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    status TEXT NOT NULL CHECK (status IN (
+                        'CREATED', 'PRECHECKED', 'SUBMITTED_UNCONFIRMED', 'PENDING',
+                        'PARTIAL', 'FILLED', 'REJECTED', 'CANCELLED', 'AMBIGUOUS', 'BLOCKED'
+                    )),
+                    symbol TEXT NOT NULL,
+                    side TEXT NOT NULL CHECK (side IN ('BUY', 'SELL')),
+                    quantity INTEGER NOT NULL CHECK (quantity > 0),
+                    configuration_version TEXT NOT NULL,
+                    snapshot_json TEXT NOT NULL,
+                    precheck_json TEXT,
+                    submission_json TEXT,
+                    reconciliation_json TEXT,
+                    reason TEXT,
+                    FOREIGN KEY (approval_id) REFERENCES approvals(id),
+                    FOREIGN KEY (candidate_id) REFERENCES trade_candidates(id),
+                    FOREIGN KEY (session_id) REFERENCES sessions(id)
+                );
+
+                CREATE INDEX IF NOT EXISTS operations_created_at ON operations(created_at DESC);
+
+                CREATE TABLE IF NOT EXISTS operation_observations (
+                    id TEXT PRIMARY KEY,
+                    operation_id TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    phase TEXT NOT NULL,
+                    observation_json TEXT NOT NULL,
+                    FOREIGN KEY (operation_id) REFERENCES operations(id)
+                );
                 """
             )
             connection.execute(
@@ -170,6 +206,10 @@ class Storage:
             )
             connection.execute(
                 "INSERT OR IGNORE INTO schema_meta(version, applied_at) VALUES (4, ?)",
+                (utc_now(),),
+            )
+            connection.execute(
+                "INSERT OR IGNORE INTO schema_meta(version, applied_at) VALUES (5, ?)",
                 (utc_now(),),
             )
             connection.execute(
@@ -719,6 +759,7 @@ class Storage:
         reason: str,
         recheck: Mapping[str, Any],
         decided_at: str,
+        emit_would_execute: bool = True,
     ) -> dict[str, Any] | None:
         payload = json.dumps(dict(recheck), separators=(",", ":"), sort_keys=True)
         with self.connect() as connection:
@@ -736,7 +777,7 @@ class Storage:
             row = connection.execute(
                 "SELECT * FROM approvals WHERE id = ?", (approval_id,)
             ).fetchone()
-            if status == "WOULD_EXECUTE":
+            if status == "WOULD_EXECUTE" and emit_would_execute:
                 self._insert_event(
                     connection,
                     session_id=str(row["session_id"]),
@@ -771,6 +812,201 @@ class Storage:
                 "SELECT * FROM approvals WHERE candidate_id = ?", (candidate_id,)
             ).fetchone()
         return self._approval_row(row) if row is not None else None
+
+    @staticmethod
+    def _operation_row(row: sqlite3.Row) -> dict[str, Any]:
+        result = dict(row)
+        result["operation_id"] = result.pop("id")
+        for source, target in (
+            ("snapshot_json", "snapshot"),
+            ("precheck_json", "precheck"),
+            ("submission_json", "submission"),
+            ("reconciliation_json", "reconciliation"),
+        ):
+            raw = result.pop(source)
+            result[target] = json.loads(str(raw)) if raw is not None else None
+        return result
+
+    def create_operation(
+        self,
+        *,
+        approval_id: str,
+        candidate_id: str,
+        session_id: str,
+        symbol: str,
+        side: str,
+        quantity: int,
+        configuration_version: str,
+        snapshot: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        now = utc_now()
+        operation_id = str(uuid4())
+        payload = json.dumps(dict(snapshot), separators=(",", ":"), sort_keys=True)
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            existing = connection.execute(
+                "SELECT * FROM operations WHERE approval_id = ? OR candidate_id = ? LIMIT 1",
+                (approval_id, candidate_id),
+            ).fetchone()
+            if existing is not None:
+                if (
+                    str(existing["approval_id"]) != approval_id
+                    or str(existing["candidate_id"]) != candidate_id
+                ):
+                    raise ValueError(
+                        "Approval or candidate is already linked to another operation."
+                    )
+                connection.commit()
+                return self._operation_row(existing)
+            approval = connection.execute(
+                "SELECT approvals.status, approvals.session_id, sessions.status AS session_status "
+                "FROM approvals JOIN sessions ON sessions.id = approvals.session_id "
+                "WHERE approvals.id = ? AND approvals.candidate_id = ?",
+                (approval_id, candidate_id),
+            ).fetchone()
+            if (
+                approval is None
+                or approval["status"] != "WOULD_EXECUTE"
+                or approval["session_id"] != session_id
+                or approval["session_status"] != "RUNNING"
+            ):
+                raise ValueError("Approval is not rechecked, linked, and active.")
+            connection.execute(
+                "INSERT INTO operations(id, approval_id, candidate_id, session_id, created_at, "
+                "updated_at, status, symbol, side, quantity, configuration_version, snapshot_json) "
+                "VALUES (?, ?, ?, ?, ?, ?, 'CREATED', ?, ?, ?, ?, ?)",
+                (
+                    operation_id,
+                    approval_id,
+                    candidate_id,
+                    session_id,
+                    now,
+                    now,
+                    symbol,
+                    side,
+                    quantity,
+                    configuration_version,
+                    payload,
+                ),
+            )
+            row = connection.execute(
+                "SELECT * FROM operations WHERE id = ?", (operation_id,)
+            ).fetchone()
+            if row is not None:
+                self._insert_event(
+                    connection,
+                    session_id=str(row["session_id"]),
+                    level="INFO",
+                    component="execution",
+                    event_type="DEMO_OPERATION_CREATED",
+                    message="Demo operation intent was persisted before external action.",
+                    details={"operation_id": operation_id, "status": "CREATED"},
+                )
+            connection.commit()
+        assert row is not None
+        return self._operation_row(row)
+
+    def update_operation(
+        self,
+        operation_id: str,
+        *,
+        status: str,
+        reason: str | None = None,
+        precheck: Mapping[str, Any] | None = None,
+        submission: Mapping[str, Any] | None = None,
+        reconciliation: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        fields = ["status = ?", "updated_at = ?"]
+        values: list[Any] = [status, utc_now()]
+        for column, value in (
+            ("reason", reason),
+            ("precheck_json", precheck),
+            ("submission_json", submission),
+            ("reconciliation_json", reconciliation),
+        ):
+            if value is not None:
+                fields.append(f"{column} = ?")
+                values.append(
+                    json.dumps(dict(value), separators=(",", ":"), sort_keys=True)
+                    if isinstance(value, Mapping)
+                    else value
+                )
+        values.append(operation_id)
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute(
+                f"UPDATE operations SET {', '.join(fields)} WHERE id = ?",  # noqa: S608
+                values,
+            )
+            row = connection.execute(
+                "SELECT * FROM operations WHERE id = ?", (operation_id,)
+            ).fetchone()
+            if row is not None:
+                self._insert_event(
+                    connection,
+                    session_id=str(row["session_id"]),
+                    level=("WARNING" if status in {"AMBIGUOUS", "BLOCKED"} else "INFO"),
+                    component="execution",
+                    event_type=f"DEMO_OPERATION_{status}",
+                    message=f"Demo operation changed to {status}.",
+                    details={"operation_id": operation_id, "status": status},
+                )
+            connection.commit()
+        if row is None:
+            raise ValueError("Operation is missing.")
+        return self._operation_row(row)
+
+    def record_operation_observation(
+        self, operation_id: str, *, phase: str, observation: Mapping[str, Any]
+    ) -> None:
+        with self.connect() as connection:
+            connection.execute(
+                "INSERT INTO operation_observations(id, operation_id, created_at, phase, "
+                "observation_json) VALUES (?, ?, ?, ?, ?)",
+                (
+                    str(uuid4()),
+                    operation_id,
+                    utc_now(),
+                    phase,
+                    json.dumps(dict(observation), separators=(",", ":"), sort_keys=True),
+                ),
+            )
+            connection.commit()
+
+    def get_operation_for_approval(self, approval_id: str) -> dict[str, Any] | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM operations WHERE approval_id = ?", (approval_id,)
+            ).fetchone()
+        return self._operation_row(row) if row is not None else None
+
+    def list_operations(self, limit: int = 100) -> list[dict[str, Any]]:
+        safe_limit = min(max(limit, 1), 500)
+        with self.connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM operations ORDER BY created_at DESC LIMIT ?", (safe_limit,)
+            ).fetchall()
+        return [self._operation_row(row) for row in rows]
+
+    def open_operations(self) -> list[dict[str, Any]]:
+        terminal = ("FILLED", "REJECTED", "CANCELLED", "BLOCKED")
+        placeholders = ",".join("?" for _ in terminal)
+        with self.connect() as connection:
+            rows = connection.execute(
+                f"SELECT * FROM operations WHERE status NOT IN ({placeholders}) "  # noqa: S608
+                "ORDER BY created_at",
+                terminal,
+            ).fetchall()
+        return [self._operation_row(row) for row in rows]
+
+    def has_blocking_operation(self) -> bool:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT 1 FROM operations WHERE status IN "
+                "('CREATED', 'PRECHECKED', 'SUBMITTED_UNCONFIRMED', 'PENDING', "
+                "'PARTIAL', 'AMBIGUOUS') LIMIT 1"
+            ).fetchone()
+        return row is not None
 
     def _insert_event(
         self,

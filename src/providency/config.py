@@ -4,10 +4,16 @@ import hashlib
 import json
 import os
 from dataclasses import asdict, dataclass
+from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
 from platformdirs import user_data_path
+
+
+class ExecutionMode(StrEnum):
+    DRY_RUN = "DRY_RUN"
+    DEMO = "DEMO"
 
 
 @dataclass(frozen=True, slots=True)
@@ -137,6 +143,7 @@ class Settings:
     patterns_dir: Path | None = None
     analysis_configuration: AnalysisConfiguration | None = None
     telegram_configuration: TelegramConfiguration | None = None
+    execution_mode: ExecutionMode = ExecutionMode.DRY_RUN
 
     @property
     def database_path(self) -> Path:
@@ -193,5 +200,8 @@ class Settings:
                 Path(configured_patterns).expanduser()
                 if (configured_patterns := os.getenv("PROVIDENCY_PATTERNS_DIR", "").strip())
                 else None
+            ),
+            execution_mode=ExecutionMode(
+                os.getenv("PROVIDENCY_EXECUTION_MODE", ExecutionMode.DRY_RUN.value).strip().upper()
             ),
         )

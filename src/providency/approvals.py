@@ -43,6 +43,7 @@ class ApprovalService:
         chat_id: int,
         user_id: int,
         ttl_seconds: int,
+        dry_run: bool = True,
         clock: Callable[[], datetime] | None = None,
         id_factory: Callable[[], str] | None = None,
     ) -> None:
@@ -50,6 +51,7 @@ class ApprovalService:
         self.chat_id = chat_id
         self.user_id = user_id
         self.ttl_seconds = ttl_seconds
+        self.dry_run = dry_run
         self.clock = clock or (lambda: datetime.now(UTC))
         self.id_factory = id_factory or (lambda: str(uuid4()))
 
@@ -124,6 +126,7 @@ class ApprovalService:
             reason=reason,
             recheck=recheck,
             decided_at=self.clock().astimezone(UTC).isoformat(),
+            emit_would_execute=self.dry_run,
         )
         if result is None:
             current = self.storage.get_approval(approval_id)
@@ -136,13 +139,13 @@ class ApprovalService:
         return result
 
 
-def render_proposal(approval: Mapping[str, Any]) -> str:
+def render_proposal(approval: Mapping[str, Any], execution_mode: str = "DRY_RUN") -> str:
     candidate = approval["candidate_snapshot"]
     confluence = candidate["confluence"]
     expiry = str(approval["expires_at"])
     return "\n".join(
         (
-            "Providency — POSSIBLE DRY-RUN OPERATION",
+            f"Providency — POSSIBLE {execution_mode} OPERATION",
             "",
             f"Proposal: {approval['id']}",
             f"Symbol: {candidate['symbol']}",
@@ -155,6 +158,9 @@ def render_proposal(approval: Mapping[str, Any]) -> str:
             f"Confluence: {confluence['passed_total']}/{confluence['applicable_total']}",
             f"Expires at: {expiry}",
             "",
-            "Approve? A new capture and full preflight will run before WOULD_EXECUTE.",
+            (
+                "Approve? A new capture and full preflight will run before "
+                + ("one demo submission." if execution_mode == "DEMO" else "WOULD_EXECUTE.")
+            ),
         )
     )

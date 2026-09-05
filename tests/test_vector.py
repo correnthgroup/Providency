@@ -10,17 +10,109 @@ from PIL import Image
 from providency.config import Settings
 from providency.context import PriceAnchor
 from providency.vector import (
+    AccountEnvironment,
     AppliedVectorState,
     CaptureDisposition,
     CaptureIssue,
     ChartCaptureService,
     DesiredVectorState,
+    OrderState,
+    PlaywrightControlProbe,
     PlaywrightPageProbe,
+    PositionState,
     VectorAdapter,
     VectorAdapterError,
     VectorSelectors,
     VectorStateSynchronizer,
 )
+
+
+class DemoNode:
+    def __init__(self, text: str | None) -> None:
+        self.text = text
+
+    async def is_visible(self) -> bool:
+        return self.text is not None
+
+    async def text_content(self) -> str | None:
+        return self.text
+
+
+class DemoLocator:
+    def __init__(self, text: str | None) -> None:
+        self.node = DemoNode(text)
+
+    async def count(self) -> int:
+        return 1 if self.node.text is not None else 0
+
+    def nth(self, _index: int) -> DemoNode:
+        return self.node
+
+    @property
+    def first(self) -> DemoNode:
+        return self.node
+
+
+class DemoPage:
+    def __init__(self, values: Mapping[str, str]) -> None:
+        self.values = values
+
+    def locator(self, selector: str) -> DemoLocator:
+        return DemoLocator(self.values.get(selector))
+
+
+@pytest.mark.asyncio
+async def test_demo_observation_uses_explicit_dom_states() -> None:
+    configured = VectorSelectors(
+        chart="#chart",
+        modal="#modal",
+        loading="#loading",
+        login="#login",
+        symbol="#symbol",
+        timeframe="#timeframe",
+        account_environment="#account",
+        quantity_value="#quantity",
+        order_state="#order",
+        order_id="#order-id",
+        order_requested_quantity="#requested",
+        order_filled_quantity="#filled",
+        position_state="#position",
+        position_quantity="#position-quantity",
+        position_average_price="#average",
+    )
+    probe = PlaywrightControlProbe(
+        DemoPage(
+            {
+                "#account": "DEMO",
+                "#symbol": "BTC/BRL",
+                "#quantity": "2",
+                "#order": "PARTIAL",
+                "#order-id": "vector-1",
+                "#requested": "2",
+                "#filled": "1",
+                "#position": "SHORT",
+                "#position-quantity": "1",
+                "#average": "100,50",
+            }
+        ),
+        configured,
+    )
+
+    observed = await probe.observe_demo_state()
+
+    assert observed.account is AccountEnvironment.DEMO
+    assert observed.order.state is OrderState.PARTIAL
+    assert observed.position.state is PositionState.SHORT
+    assert observed.position.average_price == 100.5
+
+
+@pytest.mark.asyncio
+async def test_missing_demo_selectors_are_unknown() -> None:
+    configured = VectorSelectors("#chart", "#modal", "#loading", "#login", "#symbol", "#tf")
+    observed = await PlaywrightControlProbe(DemoPage({}), configured).observe_demo_state()
+    assert observed.account is AccountEnvironment.UNKNOWN
+    assert observed.order.state is OrderState.UNKNOWN
+    assert observed.position.state is PositionState.UNKNOWN
 
 
 class FakeProbe:

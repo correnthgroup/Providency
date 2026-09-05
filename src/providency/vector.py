@@ -37,6 +37,93 @@ class CaptureIssue(StrEnum):
     APPLIED_STATE_MISMATCH = "APPLIED_STATE_MISMATCH"
 
 
+class AccountEnvironment(StrEnum):
+    DEMO = "DEMO"
+    UNKNOWN = "UNKNOWN"
+
+
+class TradeSide(StrEnum):
+    BUY = "BUY"
+    SELL = "SELL"
+
+
+class OrderState(StrEnum):
+    NONE = "NONE"
+    PENDING = "PENDING"
+    PARTIAL = "PARTIAL"
+    FILLED = "FILLED"
+    REJECTED = "REJECTED"
+    CANCELLED = "CANCELLED"
+    UNKNOWN = "UNKNOWN"
+
+
+class PositionState(StrEnum):
+    FLAT = "FLAT"
+    LONG = "LONG"
+    SHORT = "SHORT"
+    UNKNOWN = "UNKNOWN"
+
+
+@dataclass(frozen=True, slots=True)
+class OrderStateObservation:
+    state: OrderState
+    order_id: str | None
+    requested_quantity: int | None
+    filled_quantity: int | None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {**asdict(self), "state": self.state.value}
+
+
+@dataclass(frozen=True, slots=True)
+class PositionStateObservation:
+    state: PositionState
+    quantity: int | None
+    average_price: float | None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {**asdict(self), "state": self.state.value}
+
+
+@dataclass(frozen=True, slots=True)
+class DemoAccountState:
+    account: AccountEnvironment
+    symbol: str | None
+    quantity: int | None
+    order: OrderStateObservation
+    position: PositionStateObservation
+
+    @property
+    def is_readable(self) -> bool:
+        return (
+            self.account is AccountEnvironment.DEMO
+            and self.symbol is not None
+            and self.quantity is not None
+            and self.order.state is not OrderState.UNKNOWN
+            and self.position.state is not PositionState.UNKNOWN
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "account": self.account.value,
+            "symbol": self.symbol,
+            "quantity": self.quantity,
+            "order": self.order.to_dict(),
+            "position": self.position.to_dict(),
+            "is_readable": self.is_readable,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class DemoExecutionResult:
+    pre: DemoAccountState
+    post: DemoAccountState
+    action: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"pre": self.pre.to_dict(), "post": self.post.to_dict(), "action": self.action}
+
+
 @dataclass(frozen=True, slots=True)
 class DesiredVectorState:
     symbol: str
@@ -193,6 +280,19 @@ class VectorSelectors:
     moving_average_value: str = ""
     moving_average_toggle_template: str = ""
     price_anchor: str = ""
+    account_environment: str = ""
+    quantity_value: str = ""
+    demo_account_control: str = ""
+    quantity_control: str = ""
+    buy_control: str = ""
+    sell_control: str = ""
+    order_state: str = ""
+    order_id: str = ""
+    order_requested_quantity: str = ""
+    order_filled_quantity: str = ""
+    position_state: str = ""
+    position_quantity: str = ""
+    position_average_price: str = ""
 
     @classmethod
     def from_env(cls) -> VectorSelectors:
@@ -230,6 +330,29 @@ class VectorSelectors:
                 "PROVIDENCY_VECTOR_MA_TOGGLE_SELECTOR_TEMPLATE", ""
             ).strip(),
             price_anchor=os.getenv("PROVIDENCY_VECTOR_PRICE_ANCHOR_SELECTOR", "").strip(),
+            account_environment=os.getenv(
+                "PROVIDENCY_VECTOR_ACCOUNT_ENVIRONMENT_SELECTOR", ""
+            ).strip(),
+            quantity_value=os.getenv("PROVIDENCY_VECTOR_QUANTITY_VALUE_SELECTOR", "").strip(),
+            demo_account_control=os.getenv(
+                "PROVIDENCY_VECTOR_DEMO_ACCOUNT_CONTROL_SELECTOR", ""
+            ).strip(),
+            quantity_control=os.getenv("PROVIDENCY_VECTOR_QUANTITY_CONTROL_SELECTOR", "").strip(),
+            buy_control=os.getenv("PROVIDENCY_VECTOR_BUY_CONTROL_SELECTOR", "").strip(),
+            sell_control=os.getenv("PROVIDENCY_VECTOR_SELL_CONTROL_SELECTOR", "").strip(),
+            order_state=os.getenv("PROVIDENCY_VECTOR_ORDER_STATE_SELECTOR", "").strip(),
+            order_id=os.getenv("PROVIDENCY_VECTOR_ORDER_ID_SELECTOR", "").strip(),
+            order_requested_quantity=os.getenv(
+                "PROVIDENCY_VECTOR_ORDER_REQUESTED_QUANTITY_SELECTOR", ""
+            ).strip(),
+            order_filled_quantity=os.getenv(
+                "PROVIDENCY_VECTOR_ORDER_FILLED_QUANTITY_SELECTOR", ""
+            ).strip(),
+            position_state=os.getenv("PROVIDENCY_VECTOR_POSITION_STATE_SELECTOR", "").strip(),
+            position_quantity=os.getenv("PROVIDENCY_VECTOR_POSITION_QUANTITY_SELECTOR", "").strip(),
+            position_average_price=os.getenv(
+                "PROVIDENCY_VECTOR_POSITION_AVERAGE_PRICE_SELECTOR", ""
+            ).strip(),
         )
 
 
@@ -303,6 +426,16 @@ class VectorAdapterContract(Protocol):
     async def capture_primary_context(
         self, desired: DesiredVectorState, context_timeframe: str
     ) -> tuple[ChartCapture, ChartCapture, StateSyncResult]: ...
+
+    async def observe_demo_state(self) -> DemoAccountState: ...
+
+    async def prepare_demo_order(self, quantity: int) -> DemoExecutionResult: ...
+
+    async def select_demo_account(self) -> DemoExecutionResult: ...
+
+    async def submit_demo_order(
+        self, side: TradeSide, *, symbol: str, quantity: int
+    ) -> DemoExecutionResult: ...
 
     async def stop(self) -> None: ...
 
@@ -554,6 +687,80 @@ class PlaywrightControlProbe:
         if checked != enabled:
             await locator.click()
 
+    @staticmethod
+    def _integer(value: str | None) -> int | None:
+        if value is None:
+            return None
+        match = PlaywrightControlProbe._number.search(value)
+        if match is None:
+            return None
+        return int(match.group().replace(".", "").replace(",", ""))
+
+    @staticmethod
+    def _enum(value: str | None, kind: type[StrEnum]) -> StrEnum | None:
+        if value is None:
+            return None
+        normalized = value.strip().upper().replace(" ", "_")
+        try:
+            return kind(normalized)
+        except ValueError:
+            return None
+
+    async def observe_demo_state(self) -> DemoAccountState:
+        account_value = self._enum(
+            await self._text(self.selectors.account_environment), AccountEnvironment
+        )
+        order_value = self._enum(await self._text(self.selectors.order_state), OrderState)
+        position_value = self._enum(await self._text(self.selectors.position_state), PositionState)
+        average = await self._text(self.selectors.position_average_price)
+        return DemoAccountState(
+            account=(
+                account_value
+                if isinstance(account_value, AccountEnvironment)
+                else AccountEnvironment.UNKNOWN
+            ),
+            symbol=await self.read_symbol(),
+            quantity=self._integer(await self._text(self.selectors.quantity_value)),
+            order=OrderStateObservation(
+                order_value if isinstance(order_value, OrderState) else OrderState.UNKNOWN,
+                await self._text(self.selectors.order_id),
+                self._integer(await self._text(self.selectors.order_requested_quantity)),
+                self._integer(await self._text(self.selectors.order_filled_quantity)),
+            ),
+            position=PositionStateObservation(
+                position_value
+                if isinstance(position_value, PositionState)
+                else PositionState.UNKNOWN,
+                self._integer(await self._text(self.selectors.position_quantity)),
+                self._decimal(average) if average is not None else None,
+            ),
+        )
+
+    async def set_quantity(self, quantity: int) -> None:
+        if quantity <= 0 or not self.selectors.quantity_control:
+            raise VectorAdapterError(
+                "PV-VECTOR-010", "An explicit positive demo quantity is required."
+            )
+        locator = self.page.locator(self.selectors.quantity_control).first
+        await locator.fill(str(quantity))
+
+    async def select_demo_account(self) -> None:
+        if not self.selectors.demo_account_control:
+            raise VectorAdapterError(
+                "PV-VECTOR-015", "An explicit demo-account selector is required."
+            )
+        await self.page.locator(self.selectors.demo_account_control).first.click()
+
+    async def submit_side(self, side: TradeSide) -> None:
+        selector = (
+            self.selectors.buy_control if side is TradeSide.BUY else self.selectors.sell_control
+        )
+        if not selector:
+            raise VectorAdapterError(
+                "PV-VECTOR-011", "An explicit demo order selector is required."
+            )
+        await self.page.locator(selector).first.click()
+
 
 class VectorAdapterError(RuntimeError):
     def __init__(self, code: str, message: str) -> None:
@@ -661,6 +868,76 @@ class VectorAdapter:
             return await synchronizer.capture_primary_context(
                 desired, context_timeframe=context_timeframe, capture=capture
             )
+
+    async def observe_demo_state(self) -> DemoAccountState:
+        async with self._lock:
+            if self._page is None:
+                raise VectorAdapterError(
+                    "PV-VECTOR-002", "Open Vector Web before observing demo state."
+                )
+            return await PlaywrightControlProbe(self._page, self.selectors).observe_demo_state()
+
+    async def prepare_demo_order(self, quantity: int) -> DemoExecutionResult:
+        async with self._lock:
+            if self._page is None:
+                raise VectorAdapterError(
+                    "PV-VECTOR-002", "Open Vector Web before preparing demo order."
+                )
+            probe = PlaywrightControlProbe(self._page, self.selectors)
+            pre = await probe.observe_demo_state()
+            if pre.account is not AccountEnvironment.DEMO:
+                raise VectorAdapterError(
+                    "PV-VECTOR-012", "The applied account is not provably demo."
+                )
+            await probe.set_quantity(quantity)
+            post = await probe.observe_demo_state()
+            if post.account is not AccountEnvironment.DEMO or post.quantity != quantity:
+                raise VectorAdapterError(
+                    "PV-VECTOR-013", "Demo quantity postcondition was not verified."
+                )
+            return DemoExecutionResult(pre, post, "SET_QUANTITY")
+
+    async def select_demo_account(self) -> DemoExecutionResult:
+        async with self._lock:
+            if self._page is None:
+                raise VectorAdapterError(
+                    "PV-VECTOR-002", "Open Vector Web before selecting the demo account."
+                )
+            probe = PlaywrightControlProbe(self._page, self.selectors)
+            pre = await probe.observe_demo_state()
+            if pre.account is not AccountEnvironment.DEMO:
+                raise VectorAdapterError(
+                    "PV-VECTOR-012", "The current account is not provably demo."
+                )
+            await probe.select_demo_account()
+            post = await probe.observe_demo_state()
+            if post.account is not AccountEnvironment.DEMO:
+                raise VectorAdapterError(
+                    "PV-VECTOR-016", "Demo-account postcondition was not verified."
+                )
+            return DemoExecutionResult(pre, post, "SELECT_DEMO_ACCOUNT")
+
+    async def submit_demo_order(
+        self, side: TradeSide, *, symbol: str, quantity: int
+    ) -> DemoExecutionResult:
+        async with self._lock:
+            if self._page is None:
+                raise VectorAdapterError("PV-VECTOR-002", "Open Vector Web before demo order.")
+            probe = PlaywrightControlProbe(self._page, self.selectors)
+            pre = await probe.observe_demo_state()
+            if (
+                pre.account is not AccountEnvironment.DEMO
+                or pre.symbol != symbol
+                or pre.quantity != quantity
+                or pre.position.state is not PositionState.FLAT
+                or pre.order.state is not OrderState.NONE
+            ):
+                raise VectorAdapterError(
+                    "PV-VECTOR-014", "Demo order preconditions were not verified."
+                )
+            await probe.submit_side(side)
+            post = await probe.observe_demo_state()
+            return DemoExecutionResult(pre, post, side.value)
 
     async def stop(self) -> None:
         async with self._lock:

@@ -8,7 +8,9 @@ primeiro vertical slice do Pattern Matcher detecta candles tradicionais e
 avalia o pacote `bearish_engulfing`. O preflight de contexto e risco produz
 candidatos locais imutáveis e sempre falha fechado quando falta evidência. O
 incremento 5 envia propostas imutáveis pelo Telegram e, após SIM, só registra
-`WOULD_EXECUTE` depois de uma nova captura e rechecagem completa.
+`WOULD_EXECUTE` depois de uma nova captura e rechecagem completa. O incremento 6
+mantém `DRY_RUN` como padrão e adiciona execução supervisionada exclusivamente em
+conta demo, com intenção idempotente, PRE/ACTION/POST e reconciliação explícita.
 
 ## Desenvolvimento
 
@@ -66,13 +68,26 @@ confluências, entrada, stop, quantidade configurada, risco, RR e limites da
 sessão. `MISSING` ou `FAIL` bloqueia a proposta. Esta versão não expõe aprovação,
 Telegram, quantidade na Vector nem qualquer ação financeira.
 
+## Execução demo
+
+`PROVIDENCY_EXECUTION_MODE` aceita somente `DRY_RUN` ou `DEMO`. Não existe modo
+live nem fallback para conta real. Em `DEMO`, todos os seletores específicos de
+conta, quantidade, compra/venda, ordem e posição precisam ser calibrados
+explicitamente; ausência ou valor desconhecido bloqueia antes do envio.
+
+O `operation_id` é persistido antes da única tentativa de ordem. Timeout,
+resposta ambígua, ordem pendente ou parcial bloqueiam uma nova exposição até que
+a reconciliação observe um estado inequívoco. O incremento não cancela, zera,
+aplica stop ou faz trailing.
+
 ## Limites atuais
 
 - Mudanças não financeiras exigem seletores explícitos calibrados para o layout.
 - O detector visual ainda requer calibração com screenshots reais sanitizadas.
 - O bot do Telegram aceita somente botões SIM/NÃO vinculados ao chat e usuário
   configurados; comandos livres não são processados.
-- Nenhuma ordem financeira.
+- Ordens são possíveis somente quando `DEMO` é configurado explicitamente e a
+  conta aplicada é provada como demo antes e depois das ações.
 - Nenhuma credencial é preenchida ou armazenada pelo Providency.
 
 Segredos e dados operacionais não pertencem ao Git. Grave o token com
