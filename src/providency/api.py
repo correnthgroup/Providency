@@ -23,6 +23,7 @@ from providency.context import (
 )
 from providency.execution import DemoExecutionService
 from providency.patterns import Candle, PatternMatcher, PatternPackage
+from providency.protection import PositionProtectionService
 from providency.risk import RiskPolicy, SessionLimits, build_candidate
 from providency.service import EngineService, PatternAnalysisService
 from providency.storage import Storage
@@ -62,6 +63,10 @@ class EventPayload(BaseModel):
 class CandidateEvaluationPayload(BaseModel):
     analysis_capture_id: str
     pattern_detection_id: str
+
+
+class EmergencyStopPayload(BaseModel):
+    confirm_demo_close: bool = False
 
 
 def _absolute_candles(
@@ -117,7 +122,13 @@ def create_app(
         ttl_seconds=telegram_configuration.approval_ttl_seconds,
         dry_run=resolved.execution_mode is ExecutionMode.DRY_RUN,
     )
-    execution = DemoExecutionService(service.storage, adapter, mode=resolved.execution_mode)
+    protection = PositionProtectionService(service.storage, adapter, mode=resolved.execution_mode)
+    execution = DemoExecutionService(
+        service.storage,
+        adapter,
+        mode=resolved.execution_mode,
+        protection=protection,
+    )
     telegram_offset: int | None = None
     telegram_poll_error = False
     stop_polling = asyncio.Event()
@@ -138,7 +149,7 @@ def create_app(
                     await task
             await adapter.stop()
 
-    app = FastAPI(title="Providency Core Engine", version="0.6.0", lifespan=lifespan)
+    app = FastAPI(title="Providency Core Engine", version="0.7.0", lifespan=lifespan)
 
     def vector_error(exc: VectorAdapterError) -> HTTPException:
         session = service.storage.running_session()
@@ -176,6 +187,7 @@ def create_app(
             health = await adapter.health_check()
             if health.get("state") == "OPEN":
                 await execution.reconcile_open_operations()
+                await protection.recover_all()
         return session
 
     @app.post("/stop", response_model=SessionPayload | None)
@@ -200,7 +212,9 @@ def create_app(
             "mode": resolved.execution_mode.value,
             "demo_only": True,
             "blocking_operation": service.storage.has_blocking_operation(),
+            "blocking_protection": service.storage.has_blocking_protection(),
             "latest": service.storage.list_operations(1),
+            "latest_protection": service.storage.list_protection_policies(1),
         }
 
     @app.get("/operations")
@@ -212,6 +226,33 @@ def create_app(
         if resolved.execution_mode is not ExecutionMode.DEMO:
             raise HTTPException(status_code=409, detail="Demo execution is not enabled.")
         return await execution.reconcile_open_operations()
+
+    @app.get("/protections")
+    def protections(limit: int = Query(default=100, ge=1, le=500)) -> list[dict[str, Any]]:
+        return service.storage.list_protection_policies(limit)
+
+    @app.post("/operations/{operation_id}/protection/manage")
+    async def manage_protection(operation_id: str) -> dict[str, Any]:
+        if resolved.execution_mode is not ExecutionMode.DEMO:
+            raise HTTPException(status_code=409, detail="Demo protection is not enabled.")
+        operation = service.storage.get_operation(operation_id)
+        if operation is None or operation["status"] != "FILLED":
+            raise HTTPException(status_code=404, detail="Filled demo operation was not found.")
+        return await protection.manage(operation)
+
+    @app.post("/operations/{operation_id}/emergency-stop")
+    async def emergency_stop(operation_id: str, payload: EmergencyStopPayload) -> dict[str, Any]:
+        if resolved.execution_mode is not ExecutionMode.DEMO:
+            raise HTTPException(status_code=409, detail="Demo emergency is not enabled.")
+        if not payload.confirm_demo_close:
+            raise HTTPException(
+                status_code=400,
+                detail="Explicit confirmation of demo cancellation and close is required.",
+            )
+        operation = service.storage.get_operation(operation_id)
+        if operation is None or operation["status"] != "FILLED":
+            raise HTTPException(status_code=404, detail="Filled demo operation was not found.")
+        return await protection.emergency_stop(operation)
 
     @app.get("/vector/health")
     async def vector_health() -> dict[str, str]:

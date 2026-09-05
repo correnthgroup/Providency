@@ -28,13 +28,23 @@ class DemoAdapterContract(Protocol):
     ) -> DemoExecutionResult: ...
 
 
+class FilledProtectionContract(Protocol):
+    async def protect_filled(self, operation: Mapping[str, Any]) -> dict[str, Any]: ...
+
+
 class DemoExecutionService:
     def __init__(
-        self, storage: Storage, adapter: DemoAdapterContract, *, mode: ExecutionMode
+        self,
+        storage: Storage,
+        adapter: DemoAdapterContract,
+        *,
+        mode: ExecutionMode,
+        protection: FilledProtectionContract | None = None,
     ) -> None:
         self.storage = storage
         self.adapter = adapter
         self.mode = mode
+        self.protection = protection
         self._execution_lock = asyncio.Lock()
 
     async def execute_approved(self, approval: Mapping[str, Any]) -> dict[str, Any]:
@@ -74,7 +84,13 @@ class DemoExecutionService:
                 status="BLOCKED",
                 reason="Demo execution is disabled; DRY_RUN remains active.",
             )
-        if self.storage.has_blocking_operation() and self.storage.open_operations() != [operation]:
+        if (
+            self.storage.has_blocking_protection()
+            or (
+                self.storage.has_blocking_operation()
+                and self.storage.open_operations() != [operation]
+            )
+        ):
             return self.storage.update_operation(
                 operation_id,
                 status="BLOCKED",
@@ -148,13 +164,15 @@ class DemoExecutionService:
                 operation_id, phase="SUBMIT_POST", observation=submitted.post.to_dict()
             )
             status, reason = self._observed_status(submitted.post, operation)
-            return self.storage.update_operation(
+            updated = self.storage.update_operation(
                 operation_id,
                 status=status,
                 reason=reason,
                 submission=submitted.to_dict(),
                 reconciliation=submitted.post.to_dict(),
             )
+            await self._protect_if_filled(updated)
+            return updated
         except Exception as exc:
             return self.storage.update_operation(
                 operation_id,
@@ -179,14 +197,14 @@ class DemoExecutionService:
                     operation_id, phase="RECONCILIATION", observation=observed.to_dict()
                 )
                 status, reason = self._observed_status(observed, operation, reconciling=True)
-                results.append(
-                    self.storage.update_operation(
-                        operation_id,
-                        status=status,
-                        reason=reason,
-                        reconciliation=observed.to_dict(),
-                    )
+                updated = self.storage.update_operation(
+                    operation_id,
+                    status=status,
+                    reason=reason,
+                    reconciliation=observed.to_dict(),
                 )
+                await self._protect_if_filled(updated)
+                results.append(updated)
             except Exception as exc:
                 results.append(
                     self.storage.update_operation(
@@ -199,6 +217,15 @@ class DemoExecutionService:
                     )
                 )
         return results
+
+    async def _protect_if_filled(self, operation: Mapping[str, Any]) -> None:
+        if self.protection is not None and str(operation["status"]) == "FILLED":
+            try:
+                await self.protection.protect_filled(operation)
+            except (KeyError, TypeError, ValueError):
+                # Preserve observed FILLED evidence. A missing policy remains blocking and
+                # visible through has_blocking_protection until it can be understood.
+                return
 
     @staticmethod
     def _precheck_reason(state: DemoAccountState, operation: Mapping[str, Any]) -> str | None:

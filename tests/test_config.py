@@ -46,3 +46,10 @@ def test_unknown_execution_mode_fails_closed(monkeypatch: pytest.MonkeyPatch) ->
     monkeypatch.setenv("PROVIDENCY_EXECUTION_MODE", "LIVE")
     with pytest.raises(ValueError, match="LIVE"):
         Settings.from_env()
+
+
+def test_trailing_timeframe_is_explicit_configuration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PROVIDENCY_TRAILING_TIMEFRAME", "30min")
+    assert Settings.from_env().trading_configuration.trailing_timeframe == "30min"

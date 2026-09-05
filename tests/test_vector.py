@@ -20,6 +20,7 @@ from providency.vector import (
     PlaywrightControlProbe,
     PlaywrightPageProbe,
     PositionState,
+    ProtectionOrderState,
     VectorAdapter,
     VectorAdapterError,
     VectorSelectors,
@@ -113,6 +114,57 @@ async def test_missing_demo_selectors_are_unknown() -> None:
     assert observed.account is AccountEnvironment.UNKNOWN
     assert observed.order.state is OrderState.UNKNOWN
     assert observed.position.state is PositionState.UNKNOWN
+
+
+@pytest.mark.asyncio
+async def test_protection_observation_distinguishes_absent_from_unknown() -> None:
+    configured = VectorSelectors(
+        chart="#chart",
+        modal="#modal",
+        loading="#loading",
+        login="#login",
+        symbol="#symbol",
+        timeframe="#timeframe",
+        account_environment="#account",
+        quantity_value="#quantity",
+        order_state="#order",
+        position_state="#position",
+        position_quantity="#position-quantity",
+        position_average_price="#average",
+        protection_state="#protection",
+        protection_order_id="#protection-id",
+        protection_side="#protection-side",
+        protection_quantity="#protection-quantity",
+        protection_stop_price="#stop-price",
+        closed_candle_timeframe="#closed-timeframe",
+        closed_candle_at="#closed-at",
+        closed_candle_open="#closed-open",
+        closed_candle_close="#closed-close",
+    )
+    values = {
+        "#account": "DEMO",
+        "#symbol": "BTC/BRL",
+        "#quantity": "2",
+        "#order": "FILLED",
+        "#position": "LONG",
+        "#position-quantity": "2",
+        "#average": "100,00",
+        "#protection": "NONE",
+        "#closed-timeframe": "30min",
+        "#closed-at": "2026-09-05T12:30:00+00:00",
+        "#closed-open": "100,00",
+        "#closed-close": "101,00",
+    }
+
+    absent = await PlaywrightControlProbe(DemoPage(values), configured).observe_protection_state()
+    unknown = await PlaywrightControlProbe(
+        DemoPage({key: value for key, value in values.items() if key != "#protection"}),
+        configured,
+    ).observe_protection_state()
+
+    assert absent.protection.state is ProtectionOrderState.NONE
+    assert absent.closed_candle.is_readable
+    assert unknown.protection.state is ProtectionOrderState.UNKNOWN
 
 
 class FakeProbe:

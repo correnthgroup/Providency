@@ -15,6 +15,7 @@ from providency.vector import (
     CaptureDisposition,
     CaptureRegion,
     ChartCapture,
+    ClosedCandleObservation,
     DemoAccountState,
     DemoExecutionResult,
     DesiredVectorState,
@@ -22,6 +23,10 @@ from providency.vector import (
     OrderStateObservation,
     PositionState,
     PositionStateObservation,
+    ProtectionExecutionResult,
+    ProtectionOrderObservation,
+    ProtectionOrderState,
+    ProtectionStateObservation,
     StateSyncResult,
     TradeSide,
 )
@@ -44,6 +49,9 @@ class FakeVectorAdapter:
         self.sha256 = "a" * 64
         self.demo_states: list[DemoAccountState] = []
         self.demo_submit_calls = 0
+        self.protection: ProtectionOrderObservation = ProtectionOrderObservation(
+            ProtectionOrderState.NONE, None, None, None, None
+        )
 
     async def health_check(self) -> dict[str, str]:
         return {"state": "OPEN"}
@@ -118,6 +126,52 @@ class FakeVectorAdapter:
         assert symbol == "BTC/BRL"
         assert quantity == 2
         return DemoExecutionResult(pre, post, side.value)
+
+    async def observe_protection_state(self, timeframe: str) -> ProtectionStateObservation:
+        return ProtectionStateObservation(
+            self.demo_states[0],
+            self.protection,
+            ClosedCandleObservation(timeframe, None, None, None),
+        )
+
+    async def apply_demo_stop(
+        self, *, side: TradeSide, quantity: int, stop_price: float, timeframe: str
+    ) -> ProtectionExecutionResult:
+        pre = await self.observe_protection_state(timeframe)
+        self.protection = ProtectionOrderObservation(
+            ProtectionOrderState.ACTIVE, "stop-1", side, quantity, stop_price
+        )
+        return ProtectionExecutionResult(
+            pre, await self.observe_protection_state(timeframe), "APPLY_STOP"
+        )
+
+    async def cancel_demo_protection(
+        self, *, order_id: str, timeframe: str
+    ) -> ProtectionExecutionResult:
+        pre = await self.observe_protection_state(timeframe)
+        assert self.protection.order_id == order_id
+        self.protection = ProtectionOrderObservation(
+            ProtectionOrderState.CANCELLED, order_id, None, None, None
+        )
+        return ProtectionExecutionResult(
+            pre, await self.observe_protection_state(timeframe), "CANCEL_PROTECTION"
+        )
+
+    async def close_demo_position(
+        self, *, side: TradeSide, quantity: int, timeframe: str
+    ) -> ProtectionExecutionResult:
+        pre = await self.observe_protection_state(timeframe)
+        current = self.demo_states[0]
+        self.demo_states[0] = DemoAccountState(
+            current.account,
+            current.symbol,
+            current.quantity,
+            current.order,
+            PositionStateObservation(PositionState.FLAT, 0, None),
+        )
+        return ProtectionExecutionResult(
+            pre, await self.observe_protection_state(timeframe), "CLOSE_POSITION"
+        )
 
     async def stop(self) -> None:
         self.stopped = True
@@ -270,6 +324,7 @@ def test_candidate_api_exposes_complete_auditable_preflight(tmp_path: Path) -> N
         symbol="BTC/BRL",
         primary_timeframe="15min",
         context_timeframe="1h",
+        trailing_timeframe="30min",
         short_ma_period=7,
         long_ma_period=70,
         quantity=2,
@@ -318,6 +373,7 @@ def test_telegram_approval_rechecks_and_records_would_execute_once(
         symbol="BTC/BRL",
         primary_timeframe="15min",
         context_timeframe="1h",
+        trailing_timeframe="30min",
         short_ma_period=7,
         long_ma_period=70,
         quantity=2,
@@ -386,6 +442,7 @@ def test_approved_proposal_is_cancelled_when_market_capture_changes(
         symbol="BTC/BRL",
         primary_timeframe="15min",
         context_timeframe="1h",
+        trailing_timeframe="30min",
         short_ma_period=7,
         long_ma_period=70,
         quantity=2,
@@ -440,6 +497,7 @@ def test_demo_mode_executes_one_rechecked_operation_and_exposes_state(
         symbol="BTC/BRL",
         primary_timeframe="15min",
         context_timeframe="1h",
+        trailing_timeframe="30min",
         short_ma_period=7,
         long_ma_period=70,
         quantity=2,
@@ -491,7 +549,19 @@ def test_demo_mode_executes_one_rechecked_operation_and_exposes_state(
         assert operation["side"] == "SELL"
         assert client.get("/execution/status").json()["mode"] == "DEMO"
         assert client.get("/operations").json()[0]["operation_id"] == operation["operation_id"]
+        assert client.get("/protections").json()[0]["status"] == "PROTECTED"
+        assert client.get("/execution/status").json()["blocking_protection"] is False
         assert adapter.demo_submit_calls == 1
         assert "WOULD_EXECUTE" not in [
             event["event_type"] for event in client.get("/events").json()
         ]
+        refused = client.post(
+            f"/operations/{operation['operation_id']}/emergency-stop",
+            json={"confirm_demo_close": False},
+        )
+        assert refused.status_code == 400
+        emergency = client.post(
+            f"/operations/{operation['operation_id']}/emergency-stop",
+            json={"confirm_demo_close": True},
+        )
+        assert emergency.json()["status"] == "CONFIRMED"

@@ -74,6 +74,8 @@ if execution_mode == "DEMO":
     st.warning("DEMO EXECUTION ENABLED — only the positively verified demo account may be used.")
 else:
     st.info("DRY_RUN is active; no order action can reach Vector Web.")
+if execution_state.get("blocking_protection"):
+    st.error("SAFE_STOP: new exposure is blocked until demo position protection is understood.")
 missing = desired.get("missing_fields", [])
 if missing:
     st.warning(
@@ -273,6 +275,50 @@ else:
                 "reason": operation["reason"],
                 "order": (operation.get("reconciliation") or {}).get("order"),
                 "position": (operation.get("reconciliation") or {}).get("position"),
+            },
+            expanded=False,
+        )
+        if status == "FILLED" and execution_mode == "DEMO":
+            manage_column, emergency_column = st.columns(2)
+            with manage_column:
+                if st.button("Manage protection", key=f"manage-{operation['operation_id']}"):
+                    api_request(
+                        "POST", f"/operations/{operation['operation_id']}/protection/manage"
+                    )
+                    st.rerun()
+            with emergency_column:
+                if st.button(
+                    "EMERGENCY STOP (demo)",
+                    key=f"emergency-{operation['operation_id']}",
+                    type="secondary",
+                ):
+                    api_request(
+                        "POST",
+                        f"/operations/{operation['operation_id']}/emergency-stop",
+                        {"confirm_demo_close": True},
+                    )
+                    st.rerun()
+
+st.subheader("Demo position protection")
+protections = api_request("GET", "/protections?limit=20")
+if not protections:
+    st.info("No persisted protection policy exists.")
+else:
+    for protection in protections:
+        status = protection["status"]
+        if status in {"PROTECTED", "BREAKEVEN", "TRAILING", "CLOSED"}:
+            st.success(f"{protection['protection_policy_id'][:12]} · {status}")
+        else:
+            st.error(f"{protection['protection_policy_id'][:12]} · {status}")
+        st.json(
+            {
+                "operation_id": protection["operation_id"],
+                "current_stop": protection["policy"].get("current_stop"),
+                "trailing_timeframe": protection["policy"].get("timeframe"),
+                "last_closed_candle": protection["policy"].get("last_closed_candle"),
+                "reason": protection["reason"],
+                "action_required": status
+                in {"SAFE_STOP", "EMERGENCY_PENDING", "EMERGENCY_UNCONFIRMED"},
             },
             expanded=False,
         )

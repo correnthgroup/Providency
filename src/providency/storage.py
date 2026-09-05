@@ -190,6 +190,41 @@ class Storage:
                     observation_json TEXT NOT NULL,
                     FOREIGN KEY (operation_id) REFERENCES operations(id)
                 );
+
+                CREATE TABLE IF NOT EXISTS protection_policies (
+                    id TEXT PRIMARY KEY,
+                    operation_id TEXT NOT NULL UNIQUE,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    status TEXT NOT NULL CHECK (status IN (
+                        'UNPROTECTED', 'APPLYING_INITIAL', 'PROTECTED', 'BREAKEVEN',
+                        'TRAILING', 'SAFE_STOP', 'EMERGENCY_PENDING',
+                        'EMERGENCY_UNCONFIRMED', 'CLOSED'
+                    )),
+                    policy_json TEXT NOT NULL,
+                    observation_json TEXT,
+                    action_json TEXT,
+                    reason TEXT,
+                    FOREIGN KEY (operation_id) REFERENCES operations(id)
+                );
+
+                CREATE INDEX IF NOT EXISTS protection_policies_updated_at
+                    ON protection_policies(updated_at DESC);
+
+                CREATE TABLE IF NOT EXISTS emergency_operations (
+                    id TEXT PRIMARY KEY,
+                    protection_policy_id TEXT NOT NULL UNIQUE,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    status TEXT NOT NULL CHECK (status IN (
+                        'CREATED', 'CANCEL_UNCONFIRMED', 'CLOSE_UNCONFIRMED',
+                        'CONFIRMED', 'AMBIGUOUS'
+                    )),
+                    snapshot_json TEXT NOT NULL,
+                    result_json TEXT,
+                    reason TEXT,
+                    FOREIGN KEY (protection_policy_id) REFERENCES protection_policies(id)
+                );
                 """
             )
             connection.execute(
@@ -210,6 +245,10 @@ class Storage:
             )
             connection.execute(
                 "INSERT OR IGNORE INTO schema_meta(version, applied_at) VALUES (5, ?)",
+                (utc_now(),),
+            )
+            connection.execute(
+                "INSERT OR IGNORE INTO schema_meta(version, applied_at) VALUES (6, ?)",
                 (utc_now(),),
             )
             connection.execute(
@@ -980,6 +1019,13 @@ class Storage:
             ).fetchone()
         return self._operation_row(row) if row is not None else None
 
+    def get_operation(self, operation_id: str) -> dict[str, Any] | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM operations WHERE id = ?", (operation_id,)
+            ).fetchone()
+        return self._operation_row(row) if row is not None else None
+
     def list_operations(self, limit: int = 100) -> list[dict[str, Any]]:
         safe_limit = min(max(limit, 1), 500)
         with self.connect() as connection:
@@ -1007,6 +1053,199 @@ class Storage:
                 "'PARTIAL', 'AMBIGUOUS') LIMIT 1"
             ).fetchone()
         return row is not None
+
+    @staticmethod
+    def _protection_row(row: sqlite3.Row) -> dict[str, Any]:
+        result = dict(row)
+        result["protection_policy_id"] = result.pop("id")
+        for source, target in (
+            ("policy_json", "policy"),
+            ("observation_json", "observation"),
+            ("action_json", "action"),
+        ):
+            raw = result.pop(source)
+            result[target] = json.loads(str(raw)) if raw is not None else None
+        return result
+
+    def create_protection_policy(
+        self, operation_id: str, policy: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        now = utc_now()
+        payload = json.dumps(dict(policy), separators=(",", ":"), sort_keys=True)
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            existing = connection.execute(
+                "SELECT * FROM protection_policies WHERE operation_id = ?", (operation_id,)
+            ).fetchone()
+            if existing is None:
+                operation = connection.execute(
+                    "SELECT status FROM operations WHERE id = ?", (operation_id,)
+                ).fetchone()
+                if operation is None or operation["status"] != "FILLED":
+                    raise ValueError("Protection requires a filled demo operation.")
+                connection.execute(
+                    "INSERT INTO protection_policies(id, operation_id, created_at, updated_at, "
+                    "status, policy_json) VALUES (?, ?, ?, ?, 'UNPROTECTED', ?)",
+                    (str(uuid4()), operation_id, now, now, payload),
+                )
+                existing = connection.execute(
+                    "SELECT * FROM protection_policies WHERE operation_id = ?", (operation_id,)
+                ).fetchone()
+            connection.commit()
+        assert existing is not None
+        return self._protection_row(existing)
+
+    def update_protection_policy(
+        self,
+        policy_id: str,
+        *,
+        status: str,
+        policy: Mapping[str, Any] | None = None,
+        observation: Mapping[str, Any] | None = None,
+        action: Mapping[str, Any] | None = None,
+        reason: str | None = None,
+    ) -> dict[str, Any]:
+        fields = ["status = ?", "updated_at = ?", "reason = ?"]
+        values: list[Any] = [status, utc_now(), reason]
+        for column, value in (
+            ("policy_json", policy),
+            ("observation_json", observation),
+            ("action_json", action),
+        ):
+            if value is not None:
+                fields.append(f"{column} = ?")
+                values.append(json.dumps(dict(value), separators=(",", ":"), sort_keys=True))
+        values.append(policy_id)
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute(
+                f"UPDATE protection_policies SET {', '.join(fields)} WHERE id = ?",  # noqa: S608
+                values,
+            )
+            row = connection.execute(
+                "SELECT * FROM protection_policies WHERE id = ?", (policy_id,)
+            ).fetchone()
+            if row is not None:
+                operation = connection.execute(
+                    "SELECT session_id FROM operations WHERE id = ?", (row["operation_id"],)
+                ).fetchone()
+                self._insert_event(
+                    connection,
+                    session_id=str(operation["session_id"]) if operation else None,
+                    level="WARNING" if status in {"SAFE_STOP", "EMERGENCY_UNCONFIRMED"} else "INFO",
+                    component="protection",
+                    event_type=f"PROTECTION_{status}",
+                    message=f"Demo protection changed to {status}.",
+                    details={"protection_policy_id": policy_id},
+                )
+            connection.commit()
+        if row is None:
+            raise ValueError("Protection policy is missing.")
+        return self._protection_row(row)
+
+    def get_protection_policy(self, operation_id: str) -> dict[str, Any] | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM protection_policies WHERE operation_id = ?", (operation_id,)
+            ).fetchone()
+        return self._protection_row(row) if row is not None else None
+
+    def list_protection_policies(self, limit: int = 100) -> list[dict[str, Any]]:
+        safe_limit = min(max(limit, 1), 500)
+        with self.connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM protection_policies ORDER BY updated_at DESC LIMIT ?", (safe_limit,)
+            ).fetchall()
+        return [self._protection_row(row) for row in rows]
+
+    def filled_operations_requiring_recovery(self) -> list[dict[str, Any]]:
+        with self.connect() as connection:
+            rows = connection.execute(
+                "SELECT operations.* FROM operations LEFT JOIN protection_policies "
+                "ON protection_policies.operation_id = operations.id "
+                "WHERE operations.status = 'FILLED' AND "
+                "(protection_policies.id IS NULL OR protection_policies.status != 'CLOSED') "
+                "ORDER BY operations.created_at"
+            ).fetchall()
+        return [self._operation_row(row) for row in rows]
+
+    def has_blocking_protection(self) -> bool:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT 1 FROM operations LEFT JOIN protection_policies "
+                "ON protection_policies.operation_id = operations.id "
+                "WHERE operations.status = 'FILLED' AND "
+                "(protection_policies.id IS NULL OR protection_policies.status IN "
+                "('UNPROTECTED', 'APPLYING_INITIAL', 'SAFE_STOP', 'EMERGENCY_PENDING', "
+                "'EMERGENCY_UNCONFIRMED')) LIMIT 1"
+            ).fetchone()
+        return row is not None
+
+    @staticmethod
+    def _emergency_row(row: sqlite3.Row) -> dict[str, Any]:
+        result = dict(row)
+        result["emergency_operation_id"] = result.pop("id")
+        for source, target in (("snapshot_json", "snapshot"), ("result_json", "result")):
+            raw = result.pop(source)
+            result[target] = json.loads(str(raw)) if raw is not None else None
+        return result
+
+    def create_emergency_operation(
+        self, policy_id: str, snapshot: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        now = utc_now()
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT * FROM emergency_operations WHERE protection_policy_id = ?", (policy_id,)
+            ).fetchone()
+            if row is None:
+                connection.execute(
+                    "INSERT INTO emergency_operations(id, protection_policy_id, created_at, "
+                    "updated_at, status, snapshot_json) VALUES (?, ?, ?, ?, 'CREATED', ?)",
+                    (
+                        str(uuid4()),
+                        policy_id,
+                        now,
+                        now,
+                        json.dumps(dict(snapshot), separators=(",", ":"), sort_keys=True),
+                    ),
+                )
+                row = connection.execute(
+                    "SELECT * FROM emergency_operations WHERE protection_policy_id = ?",
+                    (policy_id,),
+                ).fetchone()
+            connection.commit()
+        assert row is not None
+        return self._emergency_row(row)
+
+    def update_emergency_operation(
+        self,
+        emergency_id: str,
+        *,
+        status: str,
+        result: Mapping[str, Any] | None = None,
+        reason: str | None = None,
+    ) -> dict[str, Any]:
+        payload = (
+            json.dumps(dict(result), separators=(",", ":"), sort_keys=True)
+            if result is not None
+            else None
+        )
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute(
+                "UPDATE emergency_operations SET status = ?, updated_at = ?, "
+                "result_json = COALESCE(?, result_json), reason = ? WHERE id = ?",
+                (status, utc_now(), payload, reason, emergency_id),
+            )
+            row = connection.execute(
+                "SELECT * FROM emergency_operations WHERE id = ?", (emergency_id,)
+            ).fetchone()
+            connection.commit()
+        if row is None:
+            raise ValueError("Emergency operation is missing.")
+        return self._emergency_row(row)
 
     def _insert_event(
         self,

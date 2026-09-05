@@ -57,6 +57,7 @@ class AnalysisConfiguration:
     symbol: str = ""
     primary_timeframe: str = ""
     context_timeframe: str = ""
+    trailing_timeframe: str = ""
     short_ma_period: int | None = None
     long_ma_period: int | None = None
     quantity: int = 0
@@ -87,6 +88,7 @@ class AnalysisConfiguration:
             "symbol": self.symbol,
             "primary_timeframe": self.primary_timeframe,
             "context_timeframe": self.context_timeframe,
+            "trailing_timeframe": self.trailing_timeframe,
         }
         required_positive: dict[str, int | float] = {
             "quantity": self.quantity,
@@ -116,6 +118,7 @@ class AnalysisConfiguration:
             symbol=os.getenv("PROVIDENCY_SYMBOL", "").strip(),
             primary_timeframe=os.getenv("PROVIDENCY_PRIMARY_TIMEFRAME", "").strip(),
             context_timeframe=os.getenv("PROVIDENCY_CONTEXT_TIMEFRAME", "").strip(),
+            trailing_timeframe=os.getenv("PROVIDENCY_TRAILING_TIMEFRAME", "").strip(),
             short_ma_period=optional_int("PROVIDENCY_SHORT_MA_PERIOD"),
             long_ma_period=optional_int("PROVIDENCY_LONG_MA_PERIOD"),
             quantity=int(os.getenv("PROVIDENCY_QUANTITY", "0")),

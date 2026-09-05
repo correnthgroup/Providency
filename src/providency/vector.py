@@ -64,6 +64,16 @@ class PositionState(StrEnum):
     UNKNOWN = "UNKNOWN"
 
 
+class ProtectionOrderState(StrEnum):
+    NONE = "NONE"
+    PENDING = "PENDING"
+    ACTIVE = "ACTIVE"
+    PARTIAL = "PARTIAL"
+    REJECTED = "REJECTED"
+    CANCELLED = "CANCELLED"
+    UNKNOWN = "UNKNOWN"
+
+
 @dataclass(frozen=True, slots=True)
 class OrderStateObservation:
     state: OrderState
@@ -118,6 +128,71 @@ class DemoAccountState:
 class DemoExecutionResult:
     pre: DemoAccountState
     post: DemoAccountState
+    action: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"pre": self.pre.to_dict(), "post": self.post.to_dict(), "action": self.action}
+
+
+@dataclass(frozen=True, slots=True)
+class ProtectionOrderObservation:
+    state: ProtectionOrderState
+    order_id: str | None
+    side: TradeSide | None
+    quantity: int | None
+    stop_price: float | None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            **asdict(self),
+            "state": self.state.value,
+            "side": self.side.value if self.side else None,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class ClosedCandleObservation:
+    timeframe: str | None
+    closed_at: str | None
+    open_price: float | None
+    close_price: float | None
+
+    @property
+    def is_readable(self) -> bool:
+        return all(
+            value is not None
+            for value in (self.timeframe, self.closed_at, self.open_price, self.close_price)
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True, slots=True)
+class ProtectionStateObservation:
+    account: DemoAccountState
+    protection: ProtectionOrderObservation
+    closed_candle: ClosedCandleObservation
+
+    @property
+    def is_readable(self) -> bool:
+        return (
+            self.account.is_readable and self.protection.state is not ProtectionOrderState.UNKNOWN
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "account": self.account.to_dict(),
+            "protection": self.protection.to_dict(),
+            "closed_candle": self.closed_candle.to_dict(),
+            "is_readable": self.is_readable,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class ProtectionExecutionResult:
+    pre: ProtectionStateObservation
+    post: ProtectionStateObservation
     action: str
 
     def to_dict(self) -> dict[str, Any]:
@@ -293,6 +368,20 @@ class VectorSelectors:
     position_state: str = ""
     position_quantity: str = ""
     position_average_price: str = ""
+    protection_state: str = ""
+    protection_order_id: str = ""
+    protection_side: str = ""
+    protection_quantity: str = ""
+    protection_stop_price: str = ""
+    closed_candle_timeframe: str = ""
+    closed_candle_at: str = ""
+    closed_candle_open: str = ""
+    closed_candle_close: str = ""
+    stop_price_control: str = ""
+    stop_quantity_control: str = ""
+    apply_stop_control: str = ""
+    cancel_protection_control: str = ""
+    close_position_control: str = ""
 
     @classmethod
     def from_env(cls) -> VectorSelectors:
@@ -352,6 +441,42 @@ class VectorSelectors:
             position_quantity=os.getenv("PROVIDENCY_VECTOR_POSITION_QUANTITY_SELECTOR", "").strip(),
             position_average_price=os.getenv(
                 "PROVIDENCY_VECTOR_POSITION_AVERAGE_PRICE_SELECTOR", ""
+            ).strip(),
+            protection_state=os.getenv("PROVIDENCY_VECTOR_PROTECTION_STATE_SELECTOR", "").strip(),
+            protection_order_id=os.getenv(
+                "PROVIDENCY_VECTOR_PROTECTION_ORDER_ID_SELECTOR", ""
+            ).strip(),
+            protection_side=os.getenv("PROVIDENCY_VECTOR_PROTECTION_SIDE_SELECTOR", "").strip(),
+            protection_quantity=os.getenv(
+                "PROVIDENCY_VECTOR_PROTECTION_QUANTITY_SELECTOR", ""
+            ).strip(),
+            protection_stop_price=os.getenv(
+                "PROVIDENCY_VECTOR_PROTECTION_STOP_PRICE_SELECTOR", ""
+            ).strip(),
+            closed_candle_timeframe=os.getenv(
+                "PROVIDENCY_VECTOR_CLOSED_CANDLE_TIMEFRAME_SELECTOR", ""
+            ).strip(),
+            closed_candle_at=os.getenv("PROVIDENCY_VECTOR_CLOSED_CANDLE_AT_SELECTOR", "").strip(),
+            closed_candle_open=os.getenv(
+                "PROVIDENCY_VECTOR_CLOSED_CANDLE_OPEN_SELECTOR", ""
+            ).strip(),
+            closed_candle_close=os.getenv(
+                "PROVIDENCY_VECTOR_CLOSED_CANDLE_CLOSE_SELECTOR", ""
+            ).strip(),
+            stop_price_control=os.getenv(
+                "PROVIDENCY_VECTOR_STOP_PRICE_CONTROL_SELECTOR", ""
+            ).strip(),
+            stop_quantity_control=os.getenv(
+                "PROVIDENCY_VECTOR_STOP_QUANTITY_CONTROL_SELECTOR", ""
+            ).strip(),
+            apply_stop_control=os.getenv(
+                "PROVIDENCY_VECTOR_APPLY_STOP_CONTROL_SELECTOR", ""
+            ).strip(),
+            cancel_protection_control=os.getenv(
+                "PROVIDENCY_VECTOR_CANCEL_PROTECTION_CONTROL_SELECTOR", ""
+            ).strip(),
+            close_position_control=os.getenv(
+                "PROVIDENCY_VECTOR_CLOSE_POSITION_CONTROL_SELECTOR", ""
             ).strip(),
         )
 
@@ -436,6 +561,20 @@ class VectorAdapterContract(Protocol):
     async def submit_demo_order(
         self, side: TradeSide, *, symbol: str, quantity: int
     ) -> DemoExecutionResult: ...
+
+    async def observe_protection_state(self, timeframe: str) -> ProtectionStateObservation: ...
+
+    async def apply_demo_stop(
+        self, *, side: TradeSide, quantity: int, stop_price: float, timeframe: str
+    ) -> ProtectionExecutionResult: ...
+
+    async def cancel_demo_protection(
+        self, *, order_id: str, timeframe: str
+    ) -> ProtectionExecutionResult: ...
+
+    async def close_demo_position(
+        self, *, side: TradeSide, quantity: int, timeframe: str
+    ) -> ProtectionExecutionResult: ...
 
     async def stop(self) -> None: ...
 
@@ -736,6 +875,36 @@ class PlaywrightControlProbe:
             ),
         )
 
+    async def observe_protection_state(self) -> ProtectionStateObservation:
+        account = await self.observe_demo_state()
+        protection_value = self._enum(
+            await self._text(self.selectors.protection_state), ProtectionOrderState
+        )
+        side_value = self._enum(await self._text(self.selectors.protection_side), TradeSide)
+        stop_price = await self._text(self.selectors.protection_stop_price)
+        candle_open = await self._text(self.selectors.closed_candle_open)
+        candle_close = await self._text(self.selectors.closed_candle_close)
+        return ProtectionStateObservation(
+            account=account,
+            protection=ProtectionOrderObservation(
+                state=(
+                    protection_value
+                    if isinstance(protection_value, ProtectionOrderState)
+                    else ProtectionOrderState.UNKNOWN
+                ),
+                order_id=await self._text(self.selectors.protection_order_id),
+                side=side_value if isinstance(side_value, TradeSide) else None,
+                quantity=self._integer(await self._text(self.selectors.protection_quantity)),
+                stop_price=self._decimal(stop_price) if stop_price is not None else None,
+            ),
+            closed_candle=ClosedCandleObservation(
+                timeframe=await self._text(self.selectors.closed_candle_timeframe),
+                closed_at=await self._text(self.selectors.closed_candle_at),
+                open_price=self._decimal(candle_open) if candle_open is not None else None,
+                close_price=self._decimal(candle_close) if candle_close is not None else None,
+            ),
+        )
+
     async def set_quantity(self, quantity: int) -> None:
         if quantity <= 0 or not self.selectors.quantity_control:
             raise VectorAdapterError(
@@ -760,6 +929,34 @@ class PlaywrightControlProbe:
                 "PV-VECTOR-011", "An explicit demo order selector is required."
             )
         await self.page.locator(selector).first.click()
+
+    async def apply_stop(self, *, price: float, quantity: int) -> None:
+        required = (
+            self.selectors.stop_price_control,
+            self.selectors.stop_quantity_control,
+            self.selectors.apply_stop_control,
+        )
+        if price <= 0 or quantity <= 0 or not all(required):
+            raise VectorAdapterError(
+                "PV-VECTOR-017", "Explicit demo stop controls and positive values are required."
+            )
+        await self.page.locator(self.selectors.stop_price_control).first.fill(str(price))
+        await self.page.locator(self.selectors.stop_quantity_control).first.fill(str(quantity))
+        await self.page.locator(self.selectors.apply_stop_control).first.click()
+
+    async def cancel_protection(self) -> None:
+        if not self.selectors.cancel_protection_control:
+            raise VectorAdapterError(
+                "PV-VECTOR-018", "An explicit demo protection cancellation selector is required."
+            )
+        await self.page.locator(self.selectors.cancel_protection_control).first.click()
+
+    async def close_position(self) -> None:
+        if not self.selectors.close_position_control:
+            raise VectorAdapterError(
+                "PV-VECTOR-019", "An explicit demo position close selector is required."
+            )
+        await self.page.locator(self.selectors.close_position_control).first.click()
 
 
 class VectorAdapterError(RuntimeError):
@@ -938,6 +1135,95 @@ class VectorAdapter:
             await probe.submit_side(side)
             post = await probe.observe_demo_state()
             return DemoExecutionResult(pre, post, side.value)
+
+    async def observe_protection_state(self, timeframe: str) -> ProtectionStateObservation:
+        async with self._lock:
+            if self._page is None:
+                raise VectorAdapterError(
+                    "PV-VECTOR-002", "Open Vector Web before observing demo protection."
+                )
+            probe = PlaywrightControlProbe(self._page, self.selectors)
+            observed = await probe.observe_protection_state()
+            if observed.closed_candle.timeframe not in {None, timeframe}:
+                return ProtectionStateObservation(
+                    observed.account,
+                    observed.protection,
+                    ClosedCandleObservation(None, None, None, None),
+                )
+            return observed
+
+    async def apply_demo_stop(
+        self, *, side: TradeSide, quantity: int, stop_price: float, timeframe: str
+    ) -> ProtectionExecutionResult:
+        async with self._lock:
+            if self._page is None:
+                raise VectorAdapterError("PV-VECTOR-002", "Open Vector Web before applying stop.")
+            probe = PlaywrightControlProbe(self._page, self.selectors)
+            pre = await probe.observe_protection_state()
+            if (
+                pre.account.account is not AccountEnvironment.DEMO
+                or pre.account.position.state not in {PositionState.LONG, PositionState.SHORT}
+                or pre.account.position.quantity != quantity
+            ):
+                raise VectorAdapterError(
+                    "PV-VECTOR-020", "Demo stop preconditions were not verified."
+                )
+            expected = (
+                TradeSide.SELL
+                if pre.account.position.state is PositionState.LONG
+                else TradeSide.BUY
+            )
+            if side is not expected:
+                raise VectorAdapterError("PV-VECTOR-020", "Protective side is inconsistent.")
+            await probe.apply_stop(price=stop_price, quantity=quantity)
+            post = await probe.observe_protection_state()
+            return ProtectionExecutionResult(pre, post, "APPLY_STOP")
+
+    async def cancel_demo_protection(
+        self, *, order_id: str, timeframe: str
+    ) -> ProtectionExecutionResult:
+        async with self._lock:
+            if self._page is None:
+                raise VectorAdapterError("PV-VECTOR-002", "Open Vector Web before cancellation.")
+            probe = PlaywrightControlProbe(self._page, self.selectors)
+            pre = await probe.observe_protection_state()
+            if (
+                pre.account.account is not AccountEnvironment.DEMO
+                or pre.protection.order_id != order_id
+            ):
+                raise VectorAdapterError(
+                    "PV-VECTOR-021", "Demo protection cancellation preconditions failed."
+                )
+            await probe.cancel_protection()
+            post = await probe.observe_protection_state()
+            return ProtectionExecutionResult(pre, post, "CANCEL_PROTECTION")
+
+    async def close_demo_position(
+        self, *, side: TradeSide, quantity: int, timeframe: str
+    ) -> ProtectionExecutionResult:
+        async with self._lock:
+            if self._page is None:
+                raise VectorAdapterError("PV-VECTOR-002", "Open Vector Web before closing demo.")
+            probe = PlaywrightControlProbe(self._page, self.selectors)
+            pre = await probe.observe_protection_state()
+            if (
+                pre.account.account is not AccountEnvironment.DEMO
+                or pre.account.position.quantity != quantity
+                or pre.account.position.state not in {PositionState.LONG, PositionState.SHORT}
+            ):
+                raise VectorAdapterError(
+                    "PV-VECTOR-022", "Demo emergency-close preconditions failed."
+                )
+            expected = (
+                TradeSide.SELL
+                if pre.account.position.state is PositionState.LONG
+                else TradeSide.BUY
+            )
+            if side is not expected:
+                raise VectorAdapterError("PV-VECTOR-022", "Emergency side is inconsistent.")
+            await probe.close_position()
+            post = await probe.observe_protection_state()
+            return ProtectionExecutionResult(pre, post, "CLOSE_POSITION")
 
     async def stop(self) -> None:
         async with self._lock:

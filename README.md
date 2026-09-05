@@ -65,8 +65,7 @@ do primary antes de permitir um candidato.
 
 O candidato congela hashes das capturas, detecção, configuração, escala,
 confluências, entrada, stop, quantidade configurada, risco, RR e limites da
-sessão. `MISSING` ou `FAIL` bloqueia a proposta. Esta versão não expõe aprovação,
-Telegram, quantidade na Vector nem qualquer ação financeira.
+sessão. `MISSING` ou `FAIL` bloqueia a proposta antes da aprovação por Telegram.
 
 ## Execução demo
 
@@ -77,8 +76,21 @@ explicitamente; ausência ou valor desconhecido bloqueia antes do envio.
 
 O `operation_id` é persistido antes da única tentativa de ordem. Timeout,
 resposta ambígua, ordem pendente ou parcial bloqueiam uma nova exposição até que
-a reconciliação observe um estado inequívoco. O incremento não cancela, zera,
-aplica stop ou faz trailing.
+a reconciliação observe um estado inequívoco.
+
+## Proteção, trailing e recuperação
+
+Cada posição demo preenchida cria uma política versionada ligada ao
+`operation_id`. O stop inicial, breakeven e trailing usam seletores explícitos,
+candles fechados do timeframe configurado e PRE → ACTION → POST. LONG nunca
+reduz o stop e SHORT nunca o eleva; candle repetido, aberto ou ilegível não move
+a proteção.
+
+Posição, quantidade ou stop divergente produz `SAFE_STOP`, alerta visível e
+bloqueio de nova exposição. O restart reconcilia posição e proteção antes de
+retomar. `EMERGENCY_STOP` só existe por comando humano explícito na API/UI e faz
+no máximo uma tentativa auditada de cancelar a proteção e encerrar a posição
+demo; resultado ambíguo nunca recebe retry automático.
 
 ## Limites atuais
 
