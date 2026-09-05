@@ -1,12 +1,51 @@
 from __future__ import annotations
 
+import importlib
 import os
+from collections.abc import Callable
 from pathlib import Path
-from typing import BinaryIO
+from types import ModuleType
+from typing import BinaryIO, cast
 
 
 class InstanceAlreadyRunning(RuntimeError):
     pass
+
+
+def _module_attribute(module: ModuleType, name: str) -> object:
+    return getattr(module, name)
+
+
+def _lock_handle(handle: BinaryIO) -> None:
+    if os.name == "nt":
+        module = importlib.import_module("msvcrt")
+        win_lock = cast(Callable[[int, int, int], None], _module_attribute(module, "locking"))
+        mode = cast(int, _module_attribute(module, "LK_NBLCK"))
+        win_lock(handle.fileno(), mode, 1)
+        return
+    module = importlib.import_module("fcntl")
+    unix_lock = cast(Callable[[int, int], None], _module_attribute(module, "flock"))
+    exclusive = cast(int, _module_attribute(module, "LOCK_EX"))
+    nonblocking = cast(int, _module_attribute(module, "LOCK_NB"))
+    unix_lock(
+        handle.fileno(),
+        exclusive | nonblocking,
+    )
+
+
+def _unlock_handle(handle: BinaryIO) -> None:
+    if os.name == "nt":
+        module = importlib.import_module("msvcrt")
+        win_unlock = cast(
+            Callable[[int, int, int], None], _module_attribute(module, "locking")
+        )
+        mode = cast(int, _module_attribute(module, "LK_UNLCK"))
+        win_unlock(handle.fileno(), mode, 1)
+        return
+    module = importlib.import_module("fcntl")
+    unix_unlock = cast(Callable[[int, int], None], _module_attribute(module, "flock"))
+    mode = cast(int, _module_attribute(module, "LOCK_UN"))
+    unix_unlock(handle.fileno(), mode)
 
 
 class InstanceLock:
@@ -23,16 +62,7 @@ class InstanceLock:
             handle.flush()
         handle.seek(0)
         try:
-            if os.name == "nt":
-                import msvcrt
-
-                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
-            else:
-                import fcntl
-
-                fcntl.flock(  # type: ignore[attr-defined]
-                    handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB  # type: ignore[attr-defined]
-                )
+            _lock_handle(handle)
         except OSError as exc:
             handle.close()
             raise InstanceAlreadyRunning("Providency is already running.") from exc
@@ -42,16 +72,7 @@ class InstanceLock:
         if self._handle is None:
             return
         self._handle.seek(0)
-        if os.name == "nt":
-            import msvcrt
-
-            msvcrt.locking(self._handle.fileno(), msvcrt.LK_UNLCK, 1)
-        else:
-            import fcntl
-
-            fcntl.flock(  # type: ignore[attr-defined]
-                self._handle.fileno(), fcntl.LOCK_UN  # type: ignore[attr-defined]
-            )
+        _unlock_handle(self._handle)
         self._handle.close()
         self._handle = None
 
