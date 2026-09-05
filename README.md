@@ -3,7 +3,9 @@
 Aplicativo local para observação visual supervisionada de mercado. O runtime
 fornece Core Engine local, persistência SQLite, sessões, eventos, API FastAPI,
 controle Streamlit e launcher single-instance. O `VectorAdapter` abre a Vector
-Web em um perfil persistente do Chromium e produz capturas observacionais.
+Web em um perfil persistente do Chromium e produz capturas observacionais. O
+primeiro vertical slice do Pattern Matcher detecta candles tradicionais e
+avalia o pacote `bearish_engulfing`.
 
 ## Desenvolvimento
 
@@ -37,9 +39,21 @@ login, carregamento, modal sobre o gráfico, área pequena/ausente, múltiplos
 gráficos candidatos, ativo ilegível ou timeframe ilegível. A URL configurada
 deve ser HTTPS.
 
+## Pattern Matcher
+
+A ação **Capture and analyze** faz uma captura nova, extrai caixas e OHLC
+relativo dos candles por OpenCV, aplica os predicados do Pattern Package e
+mostra `MATCH`, `FORMING` ou `NO_MATCH` com uma razão legível. A evidência no
+SQLite contém hash, caminho da screenshot, versão do pacote, candles e medidas;
+a imagem continua somente no filesystem.
+
+O catálogo `patterns/` é incluído no wheel. `PROVIDENCY_PATTERNS_DIR` pode
+apontar explicitamente para outro checkout durante desenvolvimento.
+
 ## Limites atuais
 
 - O adapter apenas abre e captura a Vector Web; não altera símbolo ou timeframe.
+- O detector visual ainda requer calibração com screenshots reais sanitizadas.
 - Nenhuma mensagem Telegram.
 - Nenhuma ordem financeira.
 - Nenhuma credencial é preenchida ou armazenada pelo Providency.

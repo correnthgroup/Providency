@@ -9,7 +9,8 @@ from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel
 
 from providency.config import Settings
-from providency.service import EngineService
+from providency.patterns import PatternMatcher, PatternPackage
+from providency.service import EngineService, PatternAnalysisService
 from providency.storage import Storage
 from providency.vector import VectorAdapter, VectorAdapterContract, VectorAdapterError
 
@@ -46,13 +47,17 @@ def create_app(
     resolved = settings or Settings.from_env()
     service = EngineService(Storage(resolved.database_path), recover=recover)
     adapter = vector_adapter or VectorAdapter(resolved)
+    matcher = PatternMatcher(
+        PatternPackage.load(resolved.pattern_catalog_dir / "bearish_engulfing" / "pattern.yaml")
+    )
+    analysis = PatternAnalysisService(service.storage, matcher)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         yield
         await adapter.stop()
 
-    app = FastAPI(title="Providency Core Engine", version="0.2.0", lifespan=lifespan)
+    app = FastAPI(title="Providency Core Engine", version="0.3.0", lifespan=lifespan)
 
     def vector_error(exc: VectorAdapterError) -> HTTPException:
         session = service.storage.running_session()
@@ -128,5 +133,34 @@ def create_app(
             details=payload,
         )
         return payload
+
+    @app.post("/pattern/analyze")
+    async def pattern_analyze() -> dict[str, Any]:
+        try:
+            capture = await adapter.capture_primary_chart()
+        except VectorAdapterError as exc:
+            raise vector_error(exc) from exc
+        payload = capture.to_dict()
+        session = service.storage.running_session()
+        usable = capture.disposition.value == "USABLE"
+        service.storage.record_event(
+            session_id=str(session["id"]) if session else None,
+            level="INFO" if usable else "WARNING",
+            component="vector",
+            event_type="VECTOR_CAPTURE_USABLE" if usable else "VECTOR_CAPTURE_BLOCKED",
+            message=(
+                "Vector chart capture is usable."
+                if usable
+                else f"Vector chart capture was blocked: {payload['issue']}."
+            ),
+            details=payload,
+        )
+        return analysis.analyze(capture).to_dict()
+
+    @app.get("/pattern/detections")
+    def pattern_detections(
+        limit: int = Query(default=100, ge=1, le=500),
+    ) -> list[dict[str, Any]]:
+        return service.storage.list_pattern_detections(limit)
 
     return app

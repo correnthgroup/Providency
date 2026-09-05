@@ -4,17 +4,20 @@ build-backend = "hatchling.build"
 
 [project]
 name = "providency"
-version = "0.2.0"
+version = "0.3.0"
 description = "Local supervised market-observation runtime"
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
 dependencies = [
   "fastapi>=0.116,<1",
+  "numpy>=2.2,<3",
+  "opencv-python-headless>=4.12,<5",
   "pillow>=11.3,<12",
   "playwright>=1.55,<2",
   "platformdirs>=4.3,<5",
   "pydantic>=2.11,<3",
   "streamlit>=1.48,<2",
+  "pyyaml>=6.0,<7",
   "uvicorn[standard]>=0.35,<1",
 ]
 
@@ -29,10 +32,14 @@ dev = [
   "pytest>=8.4,<9",
   "pytest-asyncio>=1.1,<2",
   "ruff>=0.12,<1",
+  "types-pyyaml>=6.0,<7",
 ]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/providency"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"patterns" = "providency/pattern_catalog"
 
 [tool.pytest.ini_options]
 addopts = "-q"

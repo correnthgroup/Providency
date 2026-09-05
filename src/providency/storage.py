@@ -63,10 +63,31 @@ class Storage:
                 );
 
                 CREATE INDEX IF NOT EXISTS events_created_at ON events(created_at DESC);
+
+                CREATE TABLE IF NOT EXISTS pattern_detections (
+                    id TEXT PRIMARY KEY,
+                    session_id TEXT,
+                    created_at TEXT NOT NULL,
+                    screenshot_sha256 TEXT NOT NULL,
+                    screenshot_path TEXT NOT NULL,
+                    pattern_id TEXT NOT NULL,
+                    pattern_version TEXT NOT NULL,
+                    result TEXT NOT NULL CHECK (result IN ('MATCH', 'FORMING', 'NO_MATCH')),
+                    reason TEXT NOT NULL,
+                    evidence_json TEXT NOT NULL,
+                    FOREIGN KEY (session_id) REFERENCES sessions(id)
+                );
+
+                CREATE INDEX IF NOT EXISTS pattern_detections_created_at
+                    ON pattern_detections(created_at DESC);
                 """
             )
             connection.execute(
                 "INSERT OR IGNORE INTO schema_meta(version, applied_at) VALUES (1, ?)",
+                (utc_now(),),
+            )
+            connection.execute(
+                "INSERT OR IGNORE INTO schema_meta(version, applied_at) VALUES (2, ?)",
                 (utc_now(),),
             )
             connection.commit()
@@ -201,6 +222,57 @@ class Storage:
                 details=details,
             )
             connection.commit()
+
+    def record_pattern_detection(
+        self,
+        *,
+        session_id: str | None,
+        screenshot_sha256: str,
+        screenshot_path: str,
+        pattern_id: str,
+        pattern_version: str,
+        result: str,
+        reason: str,
+        evidence: Mapping[str, Any],
+    ) -> str:
+        detection_id = str(uuid4())
+        with self.connect() as connection:
+            connection.execute(
+                "INSERT INTO pattern_detections("
+                "id, session_id, created_at, screenshot_sha256, screenshot_path, "
+                "pattern_id, pattern_version, result, reason, evidence_json"
+                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    detection_id,
+                    session_id,
+                    utc_now(),
+                    screenshot_sha256,
+                    screenshot_path,
+                    pattern_id,
+                    pattern_version,
+                    result,
+                    reason,
+                    json.dumps(dict(evidence), separators=(",", ":"), sort_keys=True),
+                ),
+            )
+            connection.commit()
+        return detection_id
+
+    def list_pattern_detections(self, limit: int = 100) -> list[dict[str, Any]]:
+        safe_limit = min(max(limit, 1), 500)
+        with self.connect() as connection:
+            rows = connection.execute(
+                "SELECT id, session_id, created_at, screenshot_sha256, screenshot_path, "
+                "pattern_id, pattern_version, result, reason, evidence_json "
+                "FROM pattern_detections ORDER BY created_at DESC LIMIT ?",
+                (safe_limit,),
+            ).fetchall()
+        detections: list[dict[str, Any]] = []
+        for row in rows:
+            detection = dict(row)
+            detection["evidence"] = json.loads(detection.pop("evidence_json"))
+            detections.append(detection)
+        return detections
 
     def _insert_event(
         self,

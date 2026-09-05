@@ -1,0 +1,21 @@
+schema_version: 1
+file: no_match_real_001.png
+source: user_provided_vector_web_screenshot
+captured_at: "2026-09-05"
+symbol: BTC/BRL
+timeframe: 15min
+label: NO_MATCH
+reason: "The final three context closes are not strictly ascending."
+sanitization:
+  method: exact_pixel_crop
+  source_region: {x: 54, y: 128, width: 1661, height: 615}
+  excluded:
+    - account_identifier
+    - account_holder_name
+    - balances
+    - positions
+    - orders
+    - operating_system_ui
+dataset_gaps:
+  - MATCH
+  - FORMING

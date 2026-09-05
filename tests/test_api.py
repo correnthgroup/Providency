@@ -1,10 +1,17 @@
 from pathlib import Path
 
 from fastapi.testclient import TestClient
+from synthetic_chart import bearish_engulfing_chart
 
 from providency.api import create_app
 from providency.config import Settings
 from providency.vector import CaptureDisposition, CaptureRegion, ChartCapture
+
+ROOT = Path(__file__).parents[1]
+
+
+def settings(tmp_path: Path) -> Settings:
+    return Settings(data_dir=tmp_path, patterns_dir=ROOT / "patterns")
 
 
 class FakeVectorAdapter:
@@ -35,7 +42,7 @@ class FakeVectorAdapter:
 
 
 def test_run_stop_and_activity_api(tmp_path: Path) -> None:
-    app = create_app(Settings(data_dir=tmp_path), recover=False)
+    app = create_app(settings(tmp_path), recover=False)
 
     with TestClient(app) as client:
         assert client.get("/health").json() == {"status": "ok"}
@@ -58,7 +65,7 @@ def test_run_stop_and_activity_api(tmp_path: Path) -> None:
 
 def test_vector_open_capture_and_activity_api(tmp_path: Path) -> None:
     adapter = FakeVectorAdapter(tmp_path / "capture.webp")
-    app = create_app(Settings(data_dir=tmp_path), recover=False, vector_adapter=adapter)
+    app = create_app(settings(tmp_path), recover=False, vector_adapter=adapter)
 
     with TestClient(app) as client:
         assert client.get("/vector/health").json() == {"state": "OPEN"}
@@ -74,3 +81,35 @@ def test_vector_open_capture_and_activity_api(tmp_path: Path) -> None:
         assert event["details"]["sha256"] == "a" * 64
 
     assert adapter.stopped
+
+
+def test_pattern_analysis_api_returns_visual_evidence_and_persists_it(tmp_path: Path) -> None:
+    capture_path = bearish_engulfing_chart(tmp_path / "capture.webp")
+    adapter = FakeVectorAdapter(capture_path)
+
+    async def valid_capture() -> ChartCapture:
+        return ChartCapture(
+            disposition=CaptureDisposition.USABLE,
+            captured_at="2026-09-05T12:30:00+00:00",
+            symbol="BTCUSD",
+            timeframe="15m",
+            region=CaptureRegion(x=1, y=2, width=320, height=200),
+            path=capture_path,
+            sha256="b" * 64,
+        )
+
+    adapter.capture_primary_chart = valid_capture  # type: ignore[method-assign]
+    app = create_app(settings(tmp_path), recover=False, vector_adapter=adapter)
+
+    with TestClient(app) as client:
+        result = client.post("/pattern/analyze").json()
+        assert result["status"] == "MATCH"
+        assert result["pattern_id"] == "bearish_engulfing"
+        assert result["pattern_version"] == "0.1.0"
+        assert len(result["evidence"]["candles"]) == 5
+        assert len(result["measures"]) == 2
+        assert result["reason"]
+
+        persisted = client.get("/pattern/detections").json()
+        assert persisted[0]["screenshot_sha256"] == "b" * 64
+        assert persisted[0]["result"] == "MATCH"

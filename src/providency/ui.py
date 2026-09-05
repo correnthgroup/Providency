@@ -6,6 +6,7 @@ import urllib.request
 from typing import Any
 
 import streamlit as st
+from PIL import Image, ImageDraw
 
 from providency.config import Settings
 
@@ -69,7 +70,7 @@ else:
 st.subheader("Vector Web")
 vector_health = api_request("GET", "/vector/health")
 st.caption(f"Browser profile: {vector_health['state']}")
-open_column, capture_column = st.columns(2)
+open_column, capture_column, analyze_column = st.columns(3)
 with open_column:
     if st.button("Open Vector", use_container_width=True):
         try:
@@ -92,3 +93,57 @@ with capture_column:
                 st.warning(f"No decision: {capture['issue']}")
         except RuntimeError as exc:
             st.error(str(exc))
+with analyze_column:
+    if st.button(
+        "Capture and analyze",
+        disabled=vector_health["state"] != "OPEN",
+        use_container_width=True,
+    ):
+        try:
+            st.session_state["last_pattern_analysis"] = api_request("POST", "/pattern/analyze")
+        except RuntimeError as exc:
+            st.error(str(exc))
+
+analysis = st.session_state.get("last_pattern_analysis")
+if analysis:
+    status = analysis["status"]
+    if status == "MATCH":
+        st.success(f"{analysis['pattern_id']} · {status}")
+    elif status == "FORMING":
+        st.info(f"{analysis['pattern_id']} · {status}")
+    else:
+        st.warning(f"{analysis['pattern_id']} · {status}")
+    st.caption(analysis["reason"])
+    evidence = analysis.get("evidence")
+    if evidence:
+        with Image.open(evidence["screenshot_path"]) as source:
+            annotated = source.convert("RGB")
+        draw = ImageDraw.Draw(annotated)
+        for index, item in enumerate(evidence["candles"]):
+            box = item["box"]
+            color = "#26a69a" if item["color"] == "BULLISH" else "#ef5350"
+            draw.rectangle(
+                (
+                    box["x"],
+                    box["y"],
+                    box["x"] + box["width"],
+                    box["y"] + box["height"],
+                ),
+                outline=color,
+                width=2,
+            )
+            draw.text((box["x"], max(0, box["y"] - 12)), str(index), fill=color)
+        st.image(annotated, caption=f"SHA-256 {evidence['screenshot_sha256']}")
+        st.dataframe(
+            [
+                {
+                    "candle": index,
+                    "color": item["color"],
+                    **item["candle"],
+                    **item["box"],
+                }
+                for index, item in enumerate(evidence["candles"])
+            ],
+            use_container_width=True,
+        )
+    st.json({"measures": analysis["measures"]}, expanded=False)
