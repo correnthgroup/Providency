@@ -45,7 +45,55 @@ def run_engine() -> None:
         host=settings.api_host,
         port=settings.api_port,
         log_level="info",
+        use_colors=False,
     )
+
+
+def _streamlit_options(settings: Settings) -> list[str]:
+    return [
+        "--server.port",
+        str(settings.ui_port),
+        "--server.address",
+        "127.0.0.1",
+        "--server.headless",
+        "true",
+        "--browser.gatherUsageStats",
+        "false",
+        "--global.developmentMode",
+        "false",
+        "--theme.base",
+        "light",
+        "--theme.primaryColor",
+        "#147A5A",
+        "--theme.backgroundColor",
+        "#F7F8F5",
+        "--theme.secondaryBackgroundColor",
+        "#E9F5F0",
+        "--theme.textColor",
+        "#10231D",
+    ]
+
+
+def run_ui() -> None:
+    from streamlit.web import cli as streamlit_cli
+
+    settings = Settings.from_env()
+    package_dir = Path(__file__).resolve().parent
+    sys.argv = [
+        "streamlit",
+        "run",
+        str(package_dir / "ui.py"),
+        *_streamlit_options(settings),
+    ]
+    streamlit_cli.main()
+
+
+def _role_command(role: str) -> list[str]:
+    if getattr(sys, "frozen", False):
+        return [sys.executable, f"--{role}"]
+    if role == "engine":
+        return [sys.executable, "-m", "providency.engine"]
+    return [sys.executable, "-m", "streamlit", "run", str(Path(__file__).parent / "ui.py")]
 
 
 def run_launcher() -> None:
@@ -60,29 +108,15 @@ def run_launcher() -> None:
             return
         raise
 
-    package_dir = Path(__file__).resolve().parent
     engine: subprocess.Popen[bytes] | None = None
     ui: subprocess.Popen[bytes] | None = None
     try:
-        engine = subprocess.Popen([sys.executable, "-m", "providency.engine"])
+        engine = subprocess.Popen(_role_command("engine"))
         _wait_for_health(settings.api_url)
-        ui = subprocess.Popen(
-            [
-                sys.executable,
-                "-m",
-                "streamlit",
-                "run",
-                str(package_dir / "ui.py"),
-                "--server.port",
-                str(settings.ui_port),
-                "--server.address",
-                "127.0.0.1",
-                "--server.headless",
-                "true",
-                "--browser.gatherUsageStats",
-                "false",
-            ]
-        )
+        ui_command = _role_command("ui")
+        if not getattr(sys, "frozen", False):
+            ui_command.extend(_streamlit_options(settings))
+        ui = subprocess.Popen(ui_command)
         webbrowser.open(ui_url)
         ui.wait()
     finally:

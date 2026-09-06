@@ -1,6 +1,11 @@
 import pytest
 
-from providency.config import ExecutionMode, Settings, TelegramConfiguration
+from providency.config import (
+    AnalysisConfiguration,
+    ExecutionMode,
+    Settings,
+    TelegramConfiguration,
+)
 
 
 def test_telegram_configuration_never_serializes_a_token(
@@ -53,6 +58,12 @@ def test_trailing_timeframe_is_explicit_configuration(
 ) -> None:
     monkeypatch.setenv("PROVIDENCY_TRAILING_TIMEFRAME", "30min")
     assert Settings.from_env().trading_configuration.trailing_timeframe == "30min"
+
+
+def test_analysis_configuration_can_be_restored_from_persisted_mapping() -> None:
+    original = AnalysisConfiguration(symbol="WIN", primary_timeframe="15m")
+    restored = AnalysisConfiguration.from_mapping(original.to_dict())
+    assert restored == original
 
 
 def test_evidence_retention_must_be_positive(monkeypatch: pytest.MonkeyPatch) -> None:

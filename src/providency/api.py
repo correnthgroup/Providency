@@ -12,7 +12,7 @@ from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from providency.approvals import ApprovalError, ApprovalService, render_proposal
-from providency.config import ExecutionMode, Settings
+from providency.config import AnalysisConfiguration, ExecutionMode, Settings
 from providency.context import (
     ConfluenceItem,
     ConfluenceResult,
@@ -96,9 +96,27 @@ class ReviewPayload(BaseModel):
     evidence_path: str
 
 
-def _absolute_candles(
-    evidence: dict[str, Any], scale: PriceScale
-) -> list[Candle]:
+class ConfigurationPayload(BaseModel):
+    schema_version: int = 1
+    symbol: str = ""
+    primary_timeframe: str = ""
+    context_timeframe: str = ""
+    trailing_timeframe: str = ""
+    short_ma_period: int | None = Field(default=None, ge=1)
+    long_ma_period: int | None = Field(default=None, ge=1)
+    quantity: int = Field(default=0, ge=0)
+    tick_size: float = Field(default=0, ge=0)
+    tick_value: float = Field(default=0, ge=0)
+    stop_buffer_ticks: int = Field(default=1, ge=0)
+    min_rr: float = Field(default=2, gt=0)
+    max_trades: int = Field(default=0, ge=0)
+    max_consecutive_losses: int = Field(default=0, ge=0)
+    max_session_loss: float = Field(default=0, ge=0)
+    pivot_window: int = Field(default=3, ge=1)
+    support_resistance_tolerance: float = Field(default=0, ge=0)
+
+
+def _absolute_candles(evidence: dict[str, Any], scale: PriceScale) -> list[Candle]:
     image_height = float(evidence["image_height"])
     result: list[Candle] = []
     for item in evidence["candles"]:
@@ -139,7 +157,12 @@ def create_app(
         PatternPackage.load(resolved.pattern_catalog_dir / "bearish_engulfing" / "pattern.yaml")
     )
     analysis = PatternAnalysisService(service.storage, matcher)
-    configuration = resolved.trading_configuration
+    stored_configuration = service.storage.latest_configuration()
+    configuration = resolved.analysis_configuration or (
+        AnalysisConfiguration.from_mapping(stored_configuration["desired"])
+        if stored_configuration is not None
+        else resolved.trading_configuration
+    )
     telegram_configuration = resolved.telegram
     telegram = telegram_client or TelegramClient()
     approvals = ApprovalService(
@@ -178,7 +201,7 @@ def create_app(
                     await task
             await adapter.stop()
 
-    app = FastAPI(title="Providency Core Engine", version="0.8.0", lifespan=lifespan)
+    app = FastAPI(title="Providency Core Engine", version="0.8.1", lifespan=lifespan)
 
     def vector_error(exc: VectorAdapterError) -> HTTPException:
         session = service.storage.running_session()
@@ -253,6 +276,23 @@ def create_app(
             "applied": service.storage.latest_applied_state(),
             "execution_mode": resolved.execution_mode.value,
         }
+
+    @app.put("/configuration")
+    def update_configuration(payload: ConfigurationPayload) -> dict[str, Any]:
+        nonlocal configuration
+        if service.storage.running_session() is not None:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "human_message": (
+                        "Pare a operação antes de alterar os parâmetros. "
+                        "Isso preserva a configuração usada pela sessão atual."
+                    )
+                },
+            )
+        configuration = AnalysisConfiguration.from_mapping(payload.model_dump())
+        service.storage.record_configuration(configuration.version, configuration.to_dict())
+        return configured_state()
 
     @app.get("/execution/status")
     def execution_status() -> dict[str, Any]:
@@ -376,9 +416,7 @@ def create_app(
         )
         capture_id = service.storage.record_analysis_capture(
             session_id=(
-                str(current["id"])
-                if (current := service.storage.running_session())
-                else None
+                str(current["id"]) if (current := service.storage.running_session()) else None
             ),
             applied_state_id=state_id,
             primary=primary.to_dict(),
@@ -459,9 +497,7 @@ def create_app(
     @app.post("/evidence/retention")
     def apply_evidence_retention() -> dict[str, Any]:
         try:
-            moved = evidence.apply_retention(
-                retention_days=resolved.evidence_retention_days
-            )
+            moved = evidence.apply_retention(retention_days=resolved.evidence_retention_days)
         except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         return {
@@ -567,9 +603,7 @@ def create_app(
         )
         items = dict(confluence.items)
         items["pattern"] = ConfluenceItem(
-            ConfluenceStatus.PASS
-            if detection["result"] == "MATCH"
-            else ConfluenceStatus.FAIL,
+            ConfluenceStatus.PASS if detection["result"] == "MATCH" else ConfluenceStatus.FAIL,
             "Primary pattern is confirmed."
             if detection["result"] == "MATCH"
             else f"Primary pattern status is {detection['result']}.",
@@ -615,10 +649,7 @@ def create_app(
         )
         low = (
             scale.price_at(
-                max(
-                    float(item["box"]["y"]) + float(item["box"]["height"])
-                    for item in formation
-                )
+                max(float(item["box"]["y"]) + float(item["box"]["height"]) for item in formation)
             )
             if scale is not None and formation
             else None
@@ -685,9 +716,7 @@ def create_app(
         )
         return result
 
-    def recheck_differences(
-        original: dict[str, Any], fresh: dict[str, Any]
-    ) -> list[str]:
+    def recheck_differences(original: dict[str, Any], fresh: dict[str, Any]) -> list[str]:
         differences: list[str] = []
         exact_fields = (
             "session_id",
@@ -774,16 +803,11 @@ def create_app(
                 else "Recheck cancelled the proposal: " + "; ".join(differences)
             ),
         )
-        if (
-            resolved.execution_mode is ExecutionMode.DEMO
-            and finished["status"] == "WOULD_EXECUTE"
-        ):
+        if resolved.execution_mode is ExecutionMode.DEMO and finished["status"] == "WOULD_EXECUTE":
             return await execution.execute_approved(finished)
         return finished
 
-    async def process_callback(
-        callback_data: str, *, chat_id: int, user_id: int
-    ) -> dict[str, Any]:
+    async def process_callback(callback_data: str, *, chat_id: int, user_id: int) -> dict[str, Any]:
         approval = approvals.consume(callback_data, chat_id=chat_id, user_id=user_id)
         if approval["status"] == "APPROVED":
             return await finish_approved_recheck(approval)

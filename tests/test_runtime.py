@@ -13,9 +13,31 @@ class CompletedProcess:
         return 0
 
 
-def test_launcher_binds_streamlit_to_localhost(
+def test_engine_disables_terminal_colors_for_windowed_package(
     tmp_path: Path, monkeypatch: Any
 ) -> None:
+    settings = Settings(data_dir=tmp_path)
+    observed: dict[str, Any] = {}
+    monkeypatch.setattr(runtime.Settings, "from_env", lambda: settings)
+    monkeypatch.setattr(runtime, "create_app", lambda _settings: "app")
+    monkeypatch.setattr(
+        runtime.uvicorn,
+        "run",
+        lambda app, **kwargs: observed.update({"app": app, **kwargs}),
+    )
+
+    runtime.run_engine()
+
+    assert observed["use_colors"] is False
+
+
+def test_streamlit_is_forced_out_of_development_mode() -> None:
+    options = runtime._streamlit_options(Settings(data_dir=Path("data")))
+    index = options.index("--global.developmentMode")
+    assert options[index + 1] == "false"
+
+
+def test_launcher_binds_streamlit_to_localhost(tmp_path: Path, monkeypatch: Any) -> None:
     settings = Settings(data_dir=tmp_path)
     commands: list[list[str]] = []
 

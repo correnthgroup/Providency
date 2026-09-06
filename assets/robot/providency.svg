@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-label="Providency">
+  <defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#16805e"/><stop offset="1" stop-color="#c9973e"/></linearGradient></defs>
+  <rect width="256" height="256" rx="62" fill="#10231d"/>
+  <path d="M128 38 204 72v54c0 49-31 78-76 94-45-16-76-45-76-94V72z" fill="url(#g)"/>
+  <rect x="81" y="88" width="94" height="72" rx="24" fill="#f7f8f5"/>
+  <circle cx="108" cy="122" r="9" fill="#147a5a"/><circle cx="148" cy="122" r="9" fill="#147a5a"/>
+  <path d="M105 143h46M128 88V70" stroke="#10231d" stroke-width="8" stroke-linecap="round"/>
+  <circle cx="128" cy="65" r="8" fill="#d6ae60"/>
+</svg>

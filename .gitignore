@@ -14,5 +14,7 @@ __pycache__/
 order.env
 data/
 dist/
+dist-debug/
 build/
+release/
 *.spec

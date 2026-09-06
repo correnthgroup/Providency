@@ -13,7 +13,10 @@ mantém `DRY_RUN` como padrão e adiciona execução supervisionada exclusivamen
 conta demo, com intenção idempotente, PRE/ACTION/POST e reconciliação explícita.
 O incremento 8 adiciona revisão humana append-only, cópias sanitizadas de
 evidência, relatórios reproduzíveis de sessão e métricas com denominadores e
-versões explícitas.
+versões explícitas. A interface `0.8.1` organiza o uso diário em **Parâmetros e
+Configurações**, **Gerenciamento e Operação** e **Atividades e Resultados**, com
+linguagem de operador, roteiro do ciclo e comparação entre estado desejado e
+aplicado.
 
 ## Desenvolvimento
 
@@ -97,11 +100,11 @@ demo; resultado ambíguo nunca recebe retry automático.
 
 ## Uso diário e melhoria
 
-As abas **Session overview**, **Human review** e **Pattern quality** mostram o
-funil operacional, permitem exportar o relatório local, criam revisões
-versionadas e exibem precision/recall sem ocultar denominadores ou insuficiência
-de amostra. A política completa de baseline, sanitização, retenção, taxonomia e
-calibração está em `DAILY_OPERATIONS.md`.
+O menu **Atividades e Resultados** mostra o funil operacional, permite exportar
+o relatório local, cria revisões versionadas e exibe precision/recall sem
+ocultar denominadores ou insuficiência de amostra. A política completa de
+baseline, sanitização, retenção, taxonomia e calibração está em
+`DAILY_OPERATIONS.md`.
 
 Screenshots sanitizadas ficam em `sanitized-evidence/` sob
 `PROVIDENCY_DATA_DIR`; relatórios ficam em `reports/`. A retenção padrão é 30
@@ -121,6 +124,27 @@ Segredos e dados operacionais não pertencem ao Git. Grave o token com
 `python -m keyring set Providency telegram-bot-token`; configure apenas chat,
 usuário e TTL pelas variáveis documentadas em `.env.example`. O token não é
 aceito por variável de ambiente, API ou SQLite.
+
+## Pacote nativo
+
+O build nativo usa PyInstaller e inclui Streamlit, Playwright, Chromium, Pattern
+Packages e identidade visual:
+
+```text
+Providency/
+├── Providency WIN.exe  (build Windows)
+├── Providency MAC.app  (build macOS)
+├── assets/
+│   └── robot/providency.svg
+└── README.txt
+```
+
+Cada plataforma gera seu próprio pacote; os dois artefatos são reunidos na
+distribuição final. Para construir na plataforma atual:
+
+```powershell
+uv run python packaging/build_release.py
+```
 
 
 O diretório `patterns/` contém os Pattern Packages iniciais e seu contrato de

@@ -1,14 +1,23 @@
+# ruff: noqa: E501
 from __future__ import annotations
 
 import json
 import urllib.error
 import urllib.request
+from datetime import date, datetime
 from typing import Any
 
 import streamlit as st
-from PIL import Image, ImageDraw
 
 from providency.config import Settings
+from providency.ui_model import (
+    NAVIGATION,
+    OPERATION_STAGES,
+    desired_applied_rows,
+    human_datetime,
+    human_event_message,
+    operational_stage,
+)
 
 
 def api_request(method: str, path: str, payload: dict[str, Any] | None = None) -> Any:
@@ -20,266 +29,376 @@ def api_request(method: str, path: str, payload: dict[str, Any] | None = None) -
         headers={"Content-Type": "application/json"} if payload is not None else {},
     )
     try:
-        with urllib.request.urlopen(request, timeout=2) as response:
+        with urllib.request.urlopen(request, timeout=10) as response:
             return json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         try:
             detail = json.loads(exc.read().decode("utf-8")).get("detail", {})
-            message = (
-                detail.get("human_message", "Request was rejected.")
-                if isinstance(detail, dict)
-                else str(detail)
-            )
+            message = detail.get("human_message") if isinstance(detail, dict) else str(detail)
         except (OSError, ValueError, AttributeError):
-            message = "Vector Web is not ready."
-        raise RuntimeError(str(message)) from exc
+            message = None
+        raise RuntimeError(message or "A solicitação foi bloqueada por segurança.") from exc
     except (OSError, ValueError, urllib.error.URLError) as exc:
-        raise RuntimeError("Core Engine is unavailable.") from exc
+        raise RuntimeError("O Core Engine não está disponível.") from exc
 
 
-st.set_page_config(page_title="Providency", page_icon="📈", layout="wide")
-st.title("Providency")
-st.caption("Local supervised market observation")
+def action(method: str, path: str, payload: dict[str, Any] | None = None) -> Any | None:
+    try:
+        return api_request(method, path, payload)
+    except RuntimeError as exc:
+        st.error(str(exc))
+        return None
 
-try:
-    state = api_request("GET", "/state")
-except RuntimeError as exc:
-    st.error(str(exc))
-    st.stop()
 
-running = state["engine_state"] == "RUNNING"
-st.metric("Core Engine", state["engine_state"])
+def inject_style() -> None:
+    st.markdown(
+        """
+        <style>
+        :root { --ink:#10231d; --muted:#61716b; --green:#147a5a; --mint:#e9f5f0;
+                --gold:#c68a2b; --paper:#f7f8f5; --line:#dce5df; --danger:#b33a3a; }
+        .stApp { background:var(--paper); color:var(--ink); }
+        [data-testid="stSidebar"] { background:#10231d; }
+        [data-testid="stSidebar"] * { color:#f5f8f6 !important; }
+        [data-testid="stMetric"] { background:white; border:1px solid var(--line);
+            border-radius:14px; padding:14px 16px; box-shadow:0 4px 18px rgba(16,35,29,.04); }
+        .brand { display:flex; align-items:center; gap:12px; margin:2px 0 22px; }
+        .brand-mark { width:44px; height:44px; display:grid; place-items:center; border-radius:14px;
+            background:linear-gradient(135deg,#1b8f6a,#d4a74e); color:white; font-size:25px; }
+        .brand-name { font:700 1.45rem Georgia,serif; color:white; line-height:1; }
+        .brand-sub { color:#a9beb5; font-size:.78rem; margin-top:5px; }
+        .hero { border-radius:20px; padding:24px 28px; margin-bottom:18px;
+            color:white; background:linear-gradient(120deg,#10231d 0%,#174f3f 68%,#9b762d 140%); }
+        .hero h1 { font:700 2rem Georgia,serif; margin:0 0 5px; color:white; }
+        .hero p { margin:0; color:#d7e3de; }
+        .eyebrow { color:#d6ae60; text-transform:uppercase; letter-spacing:.12em;
+            font-size:.72rem; font-weight:700; margin-bottom:8px; }
+        .status-pill { display:inline-flex; align-items:center; gap:8px; padding:6px 11px;
+            border-radius:999px; font-weight:700; font-size:.78rem; margin-top:15px;
+            background:rgba(255,255,255,.12); border:1px solid rgba(255,255,255,.18); }
+        .dot { width:8px; height:8px; border-radius:50%; background:#64d7a8; }
+        .roadmap { display:grid; grid-template-columns:repeat(5,1fr); gap:8px; margin:12px 0 24px; }
+        .stage { min-height:58px; padding:10px; border-radius:11px; background:white;
+            border:1px solid var(--line); color:var(--muted); font-size:.75rem; }
+        .stage b { display:block; color:var(--ink); margin-bottom:3px; }
+        .stage.done { background:var(--mint); border-color:#9bcdb9; }
+        .stage.current { background:#fff7e6; border-color:#d8ad5a; box-shadow:0 0 0 2px #f4dfb3; }
+        .section-intro { color:var(--muted); max-width:780px; margin-top:-8px; margin-bottom:18px; }
+        .event { background:white; border-left:4px solid #79a995; padding:11px 14px;
+            border-radius:0 10px 10px 0; margin:7px 0; }
+        .event.warning { border-left-color:#d0a14b; }
+        .event.error { border-left-color:var(--danger); }
+        .event small { color:var(--muted); }
+        div.stButton > button[kind="primary"] { background:var(--green); border-color:var(--green); }
+        @media(max-width:900px) { .roadmap { grid-template-columns:repeat(2,1fr); } }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
 
-run_column, stop_column = st.columns(2)
-with run_column:
-    if st.button("RUN", type="primary", disabled=running, use_container_width=True):
-        api_request("POST", "/run")
-        st.rerun()
-with stop_column:
-    if st.button("STOP", disabled=not running, use_container_width=True):
-        api_request("POST", "/stop")
-        st.rerun()
 
-session = state.get("session")
-if session:
-    st.subheader("Current session")
-    st.code(f"{session['id']} · {session['started_at']}")
+def render_hero(state: dict[str, Any], mode: str) -> None:
+    running = state["engine_state"] == "RUNNING"
+    session = state.get("session")
+    status = "Em operação" if running else "Parado e seguro"
+    detail = (
+        f"Sessão iniciada em {human_datetime(session['started_at'])}"
+        if session
+        else "Aguardando comando do operador"
+    )
+    st.markdown(
+        f"""
+        <div class="hero">
+          <div class="eyebrow">Control plane local · {mode}</div>
+          <h1>Providency</h1><p>{detail}</p>
+          <div class="status-pill"><span class="dot"></span>{status}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
-overview_tab, review_tab, quality_tab = st.tabs(
-    ["Session overview", "Human review", "Pattern quality"]
-)
-with overview_tab:
-    if session:
-        report = api_request("GET", f"/sessions/{session['id']}/report")
-        funnel = report["funnel"]
-        columns = st.columns(4)
-        columns[0].metric("Captures", funnel["captures"])
-        columns[1].metric("Confirmed patterns", funnel["confirmed_patterns"])
-        columns[2].metric("Candidates", funnel["candidates"])
-        columns[3].metric("Filled demo operations", funnel["filled_operations"])
-        if report["blocking_reasons"]:
-            st.warning("Blocking reasons are present in this session.")
-            st.json(report["blocking_reasons"], expanded=False)
-        if st.button("Export reproducible session report"):
-            exported = api_request("POST", f"/sessions/{session['id']}/report/export")
-            st.success(f"Report saved locally: {exported['path']}")
-    else:
-        st.info("Start a session to build its operational funnel.")
 
-with review_tab:
-    detections_for_review = api_request("GET", "/pattern/detections?limit=100")
-    if not detections_for_review:
-        st.info("Capture and analyze a chart before creating a human review.")
-    else:
-        detection_by_id = {item["id"]: item for item in detections_for_review}
-        selected_detection_id = st.selectbox(
-            "Detection",
-            options=list(detection_by_id),
-            format_func=lambda item: (
-                f"{detection_by_id[item]['created_at']} · "
-                f"{detection_by_id[item]['result']} · {item[:12]}"
-            ),
+def configuration_payload(desired: dict[str, Any]) -> dict[str, Any] | None:
+    with st.form("analysis-configuration"):
+        st.markdown("#### Mercado e leitura visual")
+        c1, c2, c3, c4 = st.columns(4)
+        symbol = c1.text_input(
+            "Ativo",
+            value=str(desired.get("symbol") or ""),
+            help="Símbolo exatamente como aparece no gráfico da Vector Web.",
         )
-        selected_detection = detection_by_id[selected_detection_id]
-        st.caption(selected_detection["reason"])
-        if st.button("Create sanitized review copy"):
-            st.session_state["sanitized_review_evidence"] = api_request(
-                "POST",
-                "/evidence/sanitize",
-                {"detection_id": selected_detection_id, "redactions": []},
-            )
-        sanitized = st.session_state.get("sanitized_review_evidence")
-        if sanitized and sanitized["source_sha256"] == selected_detection["screenshot_sha256"]:
-            st.image(sanitized["path"], caption="Sanitized local evidence")
-            label = st.selectbox(
-                "Review label",
-                options=[
-                    "TRUE_POSITIVE",
-                    "FALSE_POSITIVE",
-                    "FALSE_NEGATIVE",
-                    "TRUE_NEGATIVE",
-                    "NO_DECISION",
-                    "OPERATIONAL_FAILURE",
-                ],
-            )
-            notes = st.text_area("Review notes", max_chars=500)
-            if st.button("Save immutable review revision", disabled=not notes.strip()):
-                saved = api_request(
-                    "POST",
-                    "/reviews",
-                    {
-                        "detection_id": selected_detection_id,
-                        "label": label,
-                        "notes": notes,
-                        "reviewer_id": "local:operator",
-                        "evidence_sha256": sanitized["source_sha256"],
-                        "evidence_path": sanitized["path"],
-                    },
-                )
-                st.success(f"Review saved as revision {saved['revision']}.")
-                st.rerun()
-        reviews = api_request("GET", "/reviews?limit=20")
-        if reviews:
-            st.dataframe(
-                [
-                    {
-                        "created_at": item["created_at"],
-                        "label": item["label"],
-                        "revision": item["revision"],
-                        "pattern_version": item["pattern_version"],
-                        "notes": item["notes"],
-                    }
-                    for item in reviews
-                ],
-                use_container_width=True,
+        primary = c2.text_input(
+            "Timeframe principal",
+            value=str(desired.get("primary_timeframe") or ""),
+            help="Período em que o padrão principal será procurado, por exemplo 15m ou 4H.",
+        )
+        context = c3.text_input(
+            "Timeframe de contexto",
+            value=str(desired.get("context_timeframe") or ""),
+            help="Período independente usado para confirmar contexto e estrutura.",
+        )
+        trailing = c4.text_input(
+            "Timeframe de trailing",
+            value=str(desired.get("trailing_timeframe") or ""),
+            help="Período cujos candles fechados orientam o trailing stop.",
+        )
+        ma_enabled = st.checkbox(
+            "Usar médias móveis",
+            value=desired.get("short_ma_period") is not None,
+            help="Quando desabilitado, o Providency preserva as médias já aplicadas sempre que possível.",
+        )
+        m1, m2, m3 = st.columns(3)
+        short_ma = m1.number_input(
+            "Média curta",
+            min_value=1,
+            value=int(desired.get("short_ma_period") or 7),
+            disabled=not ma_enabled,
+            help="Período da média rápida usada na leitura de tendência.",
+        )
+        long_ma = m2.number_input(
+            "Média longa",
+            min_value=1,
+            value=int(desired.get("long_ma_period") or 70),
+            disabled=not ma_enabled,
+            help="Período da média lenta usada na leitura de tendência.",
+        )
+        pivot_window = m3.number_input(
+            "Janela de pivô",
+            min_value=1,
+            value=int(desired.get("pivot_window") or 3),
+            help="Quantidade de candles vizinhos usada para reconhecer pivôs de estrutura.",
+        )
+        st.markdown("#### Gerenciamento e limites")
+        r1, r2, r3, r4 = st.columns(4)
+        quantity = r1.number_input(
+            "Quantidade",
+            min_value=0,
+            value=int(desired.get("quantity") or 0),
+            help="Número de contratos da proposta. Zero bloqueia novas operações.",
+        )
+        tick_size = r2.number_input(
+            "Tamanho do tick",
+            min_value=0.0,
+            value=float(desired.get("tick_size") or 0),
+            format="%.6f",
+            help="Menor variação válida de preço do ativo.",
+        )
+        tick_value = r3.number_input(
+            "Valor do tick",
+            min_value=0.0,
+            value=float(desired.get("tick_value") or 0),
+            format="%.4f",
+            help="Valor financeiro de um tick por contrato.",
+        )
+        stop_buffer = r4.number_input(
+            "Buffer do stop (ticks)",
+            min_value=0,
+            value=int(desired.get("stop_buffer_ticks") or 0),
+            help="Margem adicionada à regra técnica de stop do padrão.",
+        )
+        l1, l2, l3, l4 = st.columns(4)
+        min_rr = l1.number_input(
+            "Risco/retorno mínimo",
+            min_value=0.1,
+            value=float(desired.get("min_rr") or 2),
+            help="Relação mínima entre ganho de referência e risco aceito.",
+        )
+        max_trades = l2.number_input(
+            "Máximo de operações",
+            min_value=0,
+            value=int(desired.get("max_trades") or 0),
+            help="Quantidade máxima de operações permitidas na sessão.",
+        )
+        max_losses = l3.number_input(
+            "Perdas consecutivas",
+            min_value=0,
+            value=int(desired.get("max_consecutive_losses") or 0),
+            help="Ao atingir este limite, novas propostas são bloqueadas.",
+        )
+        max_loss = l4.number_input(
+            "Perda máxima da sessão",
+            min_value=0.0,
+            value=float(desired.get("max_session_loss") or 0),
+            help="Limite financeiro acumulado que interrompe novas entradas.",
+        )
+        tolerance = st.number_input(
+            "Tolerância de suporte/resistência",
+            min_value=0.0,
+            value=float(desired.get("support_resistance_tolerance") or 0),
+            help="Distância máxima para considerar o preço compatível com uma região estrutural.",
+        )
+        submitted = st.form_submit_button("Salvar parâmetros", type="primary")
+    if not submitted:
+        return None
+    return {
+        "schema_version": 1,
+        "symbol": symbol.strip(),
+        "primary_timeframe": primary.strip(),
+        "context_timeframe": context.strip(),
+        "trailing_timeframe": trailing.strip(),
+        "short_ma_period": int(short_ma) if ma_enabled else None,
+        "long_ma_period": int(long_ma) if ma_enabled else None,
+        "quantity": int(quantity),
+        "tick_size": float(tick_size),
+        "tick_value": float(tick_value),
+        "stop_buffer_ticks": int(stop_buffer),
+        "min_rr": float(min_rr),
+        "max_trades": int(max_trades),
+        "max_consecutive_losses": int(max_losses),
+        "max_session_loss": float(max_loss),
+        "pivot_window": int(pivot_window),
+        "support_resistance_tolerance": float(tolerance),
+    }
+
+
+def render_settings(
+    configuration: dict[str, Any], vector: dict[str, Any], telegram: dict[str, Any]
+) -> None:
+    st.header("Parâmetros e Configurações")
+    st.markdown(
+        '<p class="section-intro">Defina o que o Providency deve observar e compare cada parâmetro com o estado realmente confirmado na Vector.</p>',
+        unsafe_allow_html=True,
+    )
+    desired = configuration["desired"]
+    if desired.get("missing_fields"):
+        st.warning("Primeiro uso: complete os parâmetros para liberar a avaliação de candidatos.")
+        completed = 3 if vector.get("state") == "OPEN" else 2
+        st.progress(completed / 4, text=f"Configuração inicial · etapa {completed} de 4")
+    payload = configuration_payload(desired)
+    if payload is not None and action("PUT", "/configuration", payload) is not None:
+        st.success("Parâmetros salvos em uma nova versão auditável.")
+        st.rerun()
+    st.divider()
+    st.subheader("Desejado × Aplicado")
+    st.dataframe(
+        desired_applied_rows(desired, configuration.get("applied")),
+        width="stretch",
+        hide_index=True,
+    )
+    left, right = st.columns(2)
+    with left:
+        st.markdown("#### Vector Web")
+        if vector.get("state") == "OPEN":
+            st.success("Navegador controlado disponível.")
+        else:
+            st.info("Abra a Vector e conclua o login manual para testar a configuração.")
+        if (
+            st.button("Abrir Vector Web", width="stretch")
+            and action("POST", "/vector/open") is not None
+        ):
+            st.info("Conclua o login na janela da Vector Web.")
+    with right:
+        st.markdown("#### Telegram")
+        missing = telegram["configuration"].get("missing_fields", [])
+        if missing:
+            st.warning("Configuração pendente: " + ", ".join(missing))
+        else:
+            st.success("Identidade e polling configurados; token protegido e mascarado.")
+        with st.expander("Como configurar"):
+            st.write(
+                "Informe chat, usuário e TTL pelas variáveis `PROVIDENCY_TELEGRAM_*`; o token permanece no cofre de credenciais do sistema operacional."
             )
 
-with quality_tab:
-    metrics = api_request("GET", "/metrics/patterns/bearish_engulfing")
-    precision = metrics["precision"]
-    recall = metrics["recall"]
-    quality_columns = st.columns(3)
-    quality_columns[0].metric(
-        "Precision",
-        "Insufficient sample"
-        if precision["value"] is None
-        else f"{precision['value'] * 100:.1f}%",
-        help=f"{precision['numerator']}/{precision['denominator']} confirmed reviews",
+
+def render_roadmap(current: int) -> None:
+    cards = []
+    for index, stage in enumerate(OPERATION_STAGES):
+        css = "done" if index < current else "current" if index == current else ""
+        marker = "Concluído" if index < current else "Agora" if index == current else "A seguir"
+        cards.append(f'<div class="stage {css}"><b>{index + 1}. {stage}</b>{marker}</div>')
+    st.markdown('<div class="roadmap">' + "".join(cards) + "</div>", unsafe_allow_html=True)
+
+
+def render_operation(
+    state: dict[str, Any],
+    configuration: dict[str, Any],
+    vector: dict[str, Any],
+    execution: dict[str, Any],
+    candidates: list[dict[str, Any]],
+    approvals: list[dict[str, Any]],
+    operations: list[dict[str, Any]],
+    protections: list[dict[str, Any]],
+) -> None:
+    st.header("Gerenciamento e Operação")
+    st.markdown(
+        '<p class="section-intro">Comande a sessão, acompanhe o estágio atual e intervenha sem perder os bloqueios de segurança.</p>',
+        unsafe_allow_html=True,
     )
-    quality_columns[1].metric(
-        "Recall",
-        "Not defensible" if recall["value"] is None else f"{recall['value'] * 100:.1f}%",
-        help=f"{recall['numerator']}/{recall['denominator']} reviewed positives",
+    running = state["engine_state"] == "RUNNING"
+    current = operational_stage(
+        running=running,
+        missing_configuration=bool(configuration["desired"].get("missing_fields")),
+        vector_state=str(vector.get("state")),
+        candidates=candidates,
+        approvals=approvals,
+        operations=operations,
+        protections=protections,
     )
-    quality_columns[2].metric("Reviewed", metrics["reviewed_total"])
-    if not metrics["sample_sufficient"]:
+    render_roadmap(current)
+    if execution["mode"] == "DRY_RUN":
         st.info(
-            "Precision is descriptive only until the confirmed-review denominator reaches "
-            f"{metrics['minimum_sample']}."
+            "DRY_RUN ativo — uma aprovação registra WOULD_EXECUTE; nenhuma ordem chega à Vector."
         )
-    st.json(
-        {
-            "counts": metrics["counts"],
-            "window": metrics["window"],
-            "detector_versions": metrics["detector_versions"],
-            "pattern_versions": metrics["pattern_versions"],
-        },
-        expanded=False,
+    else:
+        st.warning("MODO DEMO — somente a conta demo positivamente verificada pode receber ações.")
+    if execution.get("blocking_protection"):
+        st.error("SAFE_STOP — novas entradas estão bloqueadas até a proteção ser compreendida.")
+    run_col, stop_col, emergency_col = st.columns(3)
+    if (
+        run_col.button("▶  INICIAR", type="primary", disabled=running, width="stretch")
+        and action("POST", "/run") is not None
+    ):
+        st.rerun()
+    if (
+        stop_col.button("■  PARAR", disabled=not running, width="stretch")
+        and action("POST", "/stop") is not None
+    ):
+        st.rerun()
+    active = next((item for item in operations if item.get("status") == "FILLED"), None)
+    ready = bool(active and execution["mode"] == "DEMO" and st.session_state.get("emergency_ok"))
+    emergency_path = (
+        f"/operations/{active['operation_id']}/emergency-stop" if active is not None else ""
     )
-
-st.subheader("Analysis configuration")
-configuration_state = api_request("GET", "/configuration")
-desired = configuration_state["desired"]
-execution_state = api_request("GET", "/execution/status")
-execution_mode = execution_state["mode"]
-if execution_mode == "DEMO":
-    st.warning("DEMO EXECUTION ENABLED — only the positively verified demo account may be used.")
-else:
-    st.info("DRY_RUN is active; no order action can reach Vector Web.")
-if execution_state.get("blocking_protection"):
-    st.error("SAFE_STOP: new exposure is blocked until demo position protection is understood.")
-missing = desired.get("missing_fields", [])
-if missing:
-    st.warning(
-        "Candidate evaluation is blocked until these fields are configured: " + ", ".join(missing)
-    )
-else:
-    st.success(f"Configuration {desired['version']} is complete.")
-st.json(configuration_state, expanded=False)
-
-st.subheader("Activity")
-events = api_request("GET", "/events?limit=100")
-if not events:
-    st.info("No activity recorded yet.")
-else:
-    for event in events:
-        st.text(
-            f"{event['created_at']}  {event['level']:<7}  "
-            f"{event['component']:<10}  {event['message']}"
+    if (
+        emergency_col.button(
+            "⚠  PARADA DE EMERGÊNCIA", disabled=not ready, width="stretch"
         )
-
-st.subheader("Vector Web")
-vector_health = api_request("GET", "/vector/health")
-st.caption(f"Browser profile: {vector_health['state']}")
-open_column, sync_column, capture_column, analyze_column = st.columns(4)
-with open_column:
-    if st.button("Open Vector", use_container_width=True):
-        try:
-            api_request("POST", "/vector/open")
-            st.info("Complete login manually in the Vector Web window.")
-        except RuntimeError as exc:
-            st.error(str(exc))
-with capture_column:
-    if st.button(
-        "Capture analysis pair",
-        disabled=vector_health["state"] != "OPEN",
-        use_container_width=True,
+        and action("POST", emergency_path, {"confirm_demo_close": True}) is not None
     ):
-        try:
-            capture = api_request("POST", "/vector/capture-analysis")
-            st.session_state["last_analysis_capture"] = capture
-            st.session_state["last_pattern_analysis"] = capture["pattern"]
-            if (
-                capture["primary"]["disposition"] == "USABLE"
-                and capture["context"]["disposition"] == "USABLE"
-            ):
-                st.success("Primary and context captured; primary state restored.")
-                st.image(
-                    [capture["primary"]["path"], capture["context"]["path"]],
-                    caption=["Primary", "Context"],
-                )
-            else:
-                st.warning("No decision: one of the analysis captures is unusable.")
-        except RuntimeError as exc:
-            st.error(str(exc))
-with sync_column:
-    if st.button(
-        "Sync analysis state",
-        disabled=vector_health["state"] != "OPEN",
-        use_container_width=True,
+        st.session_state["emergency_ok"] = False
+        st.rerun()
+    st.checkbox(
+        "Confirmo o cancelamento/fechamento da posição demo ativa",
+        key="emergency_ok",
+        disabled=active is None or execution["mode"] != "DEMO",
+        help="A confirmação explícita evita acionamento acidental da emergência.",
+    )
+    session = state.get("session")
+    if session:
+        st.caption(
+            f"Sessão {session['id'][:8]} · iniciada em {human_datetime(session['started_at'])}"
+        )
+    st.subheader("Ciclo de observação")
+    o1, o2, o3 = st.columns(3)
+    if o1.button("1 · Sincronizar configuração", disabled=vector.get("state") != "OPEN"):
+        synced = action("POST", "/vector/sync")
+        if synced is not None:
+            st.success(
+                "Configuração aplicada e verificada."
+                if synced["matches_desired"]
+                else "Há divergências na Vector."
+            )
+    if o2.button("2 · Capturar e analisar", disabled=vector.get("state") != "OPEN"):
+        captured = action("POST", "/vector/capture-analysis")
+        if captured is not None:
+            st.session_state["last_analysis_capture"] = captured
+            st.rerun()
+    if o3.button(
+        "3 · Avaliar candidato",
+        disabled=not running or "last_analysis_capture" not in st.session_state,
     ):
-        try:
-            synced = api_request("POST", "/vector/sync")
-            if synced["matches_desired"]:
-                st.success("Symbol, timeframe, moving averages, and price scale verified.")
-            else:
-                st.warning("Applied state is incomplete or divergent.")
-            st.json(synced, expanded=False)
-        except RuntimeError as exc:
-            st.error(str(exc))
-with analyze_column:
-    if st.button(
-        "Evaluate candidate",
-        disabled=(
-            vector_health["state"] != "OPEN"
-            or not running
-            or "last_analysis_capture" not in st.session_state
-        ),
-        use_container_width=True,
-    ):
-        try:
-            captured = st.session_state["last_analysis_capture"]
-            st.session_state["last_candidate"] = api_request(
+        captured = st.session_state["last_analysis_capture"]
+        if (
+            action(
                 "POST",
                 "/candidate/evaluate",
                 {
@@ -287,185 +406,224 @@ with analyze_column:
                     "pattern_detection_id": captured["pattern_detection_id"],
                 },
             )
-        except RuntimeError as exc:
-            st.error(str(exc))
-
-analysis = st.session_state.get("last_pattern_analysis")
-if analysis:
-    status = analysis["status"]
-    if status == "MATCH":
-        st.success(f"{analysis['pattern_id']} · {status}")
-    elif status == "FORMING":
-        st.info(f"{analysis['pattern_id']} · {status}")
-    else:
-        st.warning(f"{analysis['pattern_id']} · {status}")
-    st.caption(analysis["reason"])
-    evidence = analysis.get("evidence")
-    if evidence:
-        with Image.open(evidence["screenshot_path"]) as source:
-            annotated = source.convert("RGB")
-        draw = ImageDraw.Draw(annotated)
-        for index, item in enumerate(evidence["candles"]):
-            box = item["box"]
-            color = "#26a69a" if item["color"] == "BULLISH" else "#ef5350"
-            draw.rectangle(
-                (
-                    box["x"],
-                    box["y"],
-                    box["x"] + box["width"],
-                    box["y"] + box["height"],
-                ),
-                outline=color,
-                width=2,
-            )
-            draw.text((box["x"], max(0, box["y"] - 12)), str(index), fill=color)
-        st.image(annotated, caption=f"SHA-256 {evidence['screenshot_sha256']}")
-        st.dataframe(
-            [
-                {
-                    "candle": index,
-                    "color": item["color"],
-                    **item["candle"],
-                    **item["box"],
-                }
-                for index, item in enumerate(evidence["candles"])
-            ],
-            use_container_width=True,
-        )
-    st.json({"measures": analysis["measures"]}, expanded=False)
-
-st.subheader("Trade candidates")
-st.caption(
-    "ALLOWED candidates can be sent for Telegram approval; the configured mode is "
-    f"{execution_mode}."
-)
-candidates = api_request("GET", "/candidates?limit=20")
-if not candidates:
-    st.info("No candidate has been evaluated yet.")
-else:
-    for candidate in candidates:
-        decision = candidate["decision"]
-        if decision == "ALLOWED":
-            st.success(f"{candidate['candidate_id'][:12]} · {decision}")
-        else:
-            st.warning(f"{candidate['candidate_id'][:12]} · {decision}")
-        st.write(
-            {
-                "entry": candidate["entry"],
-                "stop": candidate["stop"],
-                "quantity": candidate["quantity"],
-                "risk_amount": candidate["risk_amount"],
-                "reference_target": candidate["reference_target"],
-                "reference_rr": candidate["reference_rr"],
-                "confluence": (
-                    f"{candidate['confluence']['passed_total']}/"
-                    f"{candidate['confluence']['applicable_total']}"
-                ),
-                "limits": candidate["limits"],
-                "blocking_reasons": candidate["blocking_reasons"],
-            }
-        )
-        if decision == "ALLOWED" and st.button(
-            "Send immutable Telegram proposal", key=f"proposal-{candidate['candidate_id']}"
+            is not None
         ):
-            try:
-                proposal = api_request("POST", f"/approvals/{candidate['candidate_id']}")
-                st.success(f"Proposal {proposal['id'][:12]} · {proposal['status']}")
-                st.rerun()
-            except RuntimeError as exc:
-                st.error(str(exc))
+            st.rerun()
+    captured = st.session_state.get("last_analysis_capture")
+    if captured:
+        pattern = captured["pattern"]
+        st.markdown(f"#### Última leitura: `{pattern['status']}`")
+        st.write(pattern["reason"])
+        paths = [
+            item.get("path")
+            for item in (captured["primary"], captured["context"])
+            if item.get("path")
+        ]
+        if paths:
+            st.image(paths, caption=["Principal", "Contexto"][: len(paths)])
+    if candidates:
+        latest = candidates[0]
+        st.subheader("Proposta mais recente")
+        k1, k2, k3, k4 = st.columns(4)
+        k1.metric("Decisão", latest["decision"])
+        k2.metric("Entrada", latest.get("entry") or "—")
+        k3.metric("Stop", latest.get("stop") or "—")
+        k4.metric("Risco", latest.get("risk_amount") or "—")
+        if (
+            latest["decision"] == "ALLOWED"
+            and not approvals
+            and st.button("Enviar proposta imutável ao Telegram", type="primary")
+            and action("POST", f"/approvals/{latest['candidate_id']}") is not None
+        ):
+            st.rerun()
+        if latest.get("blocking_reasons"):
+            st.warning("Bloqueios: " + "; ".join(latest["blocking_reasons"]))
+        with st.expander("Detalhes técnicos da proposta"):
+            st.json(latest)
 
-st.subheader("Demo operations")
-operations = api_request("GET", "/operations?limit=20")
-if not operations:
-    st.info("No persisted demo operation exists.")
-else:
-    for operation in operations:
-        status = operation["status"]
-        if status == "FILLED":
-            st.success(f"{operation['operation_id'][:12]} · {status}")
-        elif status in {"PENDING", "PARTIAL", "SUBMITTED_UNCONFIRMED"}:
-            st.warning(f"{operation['operation_id'][:12]} · {status}")
-        else:
-            st.error(f"{operation['operation_id'][:12]} · {status}")
-        st.json(
-            {
-                "account": (operation.get("reconciliation") or {}).get("account"),
-                "symbol": operation["symbol"],
-                "side": operation["side"],
-                "quantity": operation["quantity"],
-                "reason": operation["reason"],
-                "order": (operation.get("reconciliation") or {}).get("order"),
-                "position": (operation.get("reconciliation") or {}).get("position"),
-            },
-            expanded=False,
+
+def _within_date(value: str | None, start: date, end: date) -> bool:
+    try:
+        current = datetime.fromisoformat((value or "").replace("Z", "+00:00")).date()
+    except ValueError:
+        return False
+    return start <= current <= end
+
+
+def render_activities_results(
+    state: dict[str, Any],
+    events: list[dict[str, Any]],
+    candidates: list[dict[str, Any]],
+    approvals: list[dict[str, Any]],
+    operations: list[dict[str, Any]],
+    protections: list[dict[str, Any]],
+) -> None:
+    st.header("Atividades e Resultados")
+    st.markdown(
+        '<p class="section-intro">Leia o que aconteceu em linguagem operacional, revise evidências e acompanhe a qualidade do padrão.</p>',
+        unsafe_allow_html=True,
+    )
+    activity_tab, result_tab, review_tab, pattern_tab = st.tabs(
+        ["Atividades", "Resultados", "Revisão humana", "Catálogo de padrões"]
+    )
+    with activity_tab:
+        level = st.selectbox("Nível", ["Todos", "INFO", "WARNING", "ERROR"])
+        visible = (
+            events if level == "Todos" else [item for item in events if item["level"] == level]
         )
-        if status == "FILLED" and execution_mode == "DEMO":
-            manage_column, emergency_column = st.columns(2)
-            with manage_column:
-                if st.button("Manage protection", key=f"manage-{operation['operation_id']}"):
-                    api_request(
-                        "POST", f"/operations/{operation['operation_id']}/protection/manage"
-                    )
-                    st.rerun()
-            with emergency_column:
-                if st.button(
-                    "EMERGENCY STOP (demo)",
-                    key=f"emergency-{operation['operation_id']}",
-                    type="secondary",
-                ):
-                    api_request(
-                        "POST",
-                        f"/operations/{operation['operation_id']}/emergency-stop",
-                        {"confirm_demo_close": True},
-                    )
-                    st.rerun()
-
-st.subheader("Demo position protection")
-protections = api_request("GET", "/protections?limit=20")
-if not protections:
-    st.info("No persisted protection policy exists.")
-else:
-    for protection in protections:
-        status = protection["status"]
-        if status in {"PROTECTED", "BREAKEVEN", "TRAILING", "CLOSED"}:
-            st.success(f"{protection['protection_policy_id'][:12]} · {status}")
-        else:
-            st.error(f"{protection['protection_policy_id'][:12]} · {status}")
-        st.json(
+        if not visible:
+            st.info("Nenhuma atividade para este filtro.")
+        for event in visible:
+            st.markdown(
+                f'<div class="event {event["level"].lower()}"><b>{human_event_message(event["message"])}</b><br><small>{human_datetime(event["created_at"])} · {event["component"]}</small></div>',
+                unsafe_allow_html=True,
+            )
+            if event["level"] == "ERROR":
+                with st.expander("Impacto e detalhes técnicos"):
+                    st.json(event.get("details", {}))
+    with result_tab:
+        session = state.get("session")
+        report = action("GET", f"/sessions/{session['id']}/report") if session else None
+        funnel = (report or {}).get("funnel", {})
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Capturas", funnel.get("captures", 0))
+        c2.metric("Padrões confirmados", funnel.get("confirmed_patterns", 0))
+        c3.metric("Candidatos", funnel.get("candidates", len(candidates)))
+        c4.metric("Operações demo", funnel.get("filled_operations", 0))
+        today = date.today()
+        dates = st.date_input("Período", value=(today.replace(day=1), today))
+        start, end = dates if isinstance(dates, tuple) and len(dates) == 2 else (today, today)
+        rows = [
             {
-                "operation_id": protection["operation_id"],
-                "current_stop": protection["policy"].get("current_stop"),
-                "trailing_timeframe": protection["policy"].get("timeframe"),
-                "last_closed_candle": protection["policy"].get("last_closed_candle"),
-                "reason": protection["reason"],
-                "action_required": status
-                in {"SAFE_STOP", "EMERGENCY_PENDING", "EMERGENCY_UNCONFIRMED"},
-            },
-            expanded=False,
-        )
-st.subheader("Telegram approvals")
-telegram_state = api_request("GET", "/telegram/status")
-telegram_missing = telegram_state["configuration"].get("missing_fields", [])
-if telegram_missing:
-    st.warning("Telegram is blocked until configured: " + ", ".join(telegram_missing))
-else:
-    st.success("Telegram approval polling is configured; the bot token remains masked.")
-st.json(telegram_state, expanded=False)
-
-approvals = api_request("GET", "/approvals?limit=20")
-if not approvals:
-    st.info("No Telegram proposal has been created yet.")
-else:
-    for approval in approvals:
-        st.write(
-            {
-                "approval_id": approval["id"],
-                "candidate_id": approval["candidate_id"],
-                "status": approval["status"],
-                "expires_at": approval["expires_at"],
-                "decided_at": approval["decided_at"],
-                "reason": approval["reason"],
-                "recheck": approval["recheck"],
+                "Data": human_datetime(item.get("created_at")),
+                "Candidato": item["candidate_id"][:8],
+                "Decisão": item["decision"],
+                "Entrada": item.get("entry"),
+                "Stop": item.get("stop"),
+                "Risco": item.get("risk_amount"),
             }
+            for item in candidates
+            if _within_date(item.get("created_at"), start, end)
+        ]
+        st.dataframe(rows, width="stretch", hide_index=True)
+        if session and st.button("Exportar relatório reproduzível"):
+            exported = action("POST", f"/sessions/{session['id']}/report/export")
+            if exported:
+                st.success(f"Relatório salvo localmente em {exported['path']}")
+    with review_tab:
+        detections = action("GET", "/pattern/detections?limit=100") or []
+        if not detections:
+            st.info("Capture e analise um gráfico para iniciar a revisão humana.")
+        else:
+            selected = st.selectbox(
+                "Detecção",
+                detections,
+                format_func=lambda item: (
+                    f"{human_datetime(item['created_at'])} · {item['result']} · {item['id'][:8]}"
+                ),
+            )
+            st.write(selected["reason"])
+            if st.button("Criar cópia sanitizada para revisão"):
+                sanitized = action(
+                    "POST", "/evidence/sanitize", {"detection_id": selected["id"], "redactions": []}
+                )
+                if sanitized:
+                    st.session_state["review_evidence"] = sanitized
+            evidence = st.session_state.get("review_evidence")
+            if evidence:
+                st.image(evidence["path"], caption="Evidência local sanitizada")
+                label = st.selectbox(
+                    "Classificação",
+                    [
+                        "TRUE_POSITIVE",
+                        "FALSE_POSITIVE",
+                        "FALSE_NEGATIVE",
+                        "TRUE_NEGATIVE",
+                        "NO_DECISION",
+                        "OPERATIONAL_FAILURE",
+                    ],
+                    help="Classifique o que o sistema viu sem reescrever a decisão histórica.",
+                )
+                notes = st.text_area("Observações", max_chars=500)
+                if st.button("Salvar revisão", disabled=not notes.strip()):
+                    saved = action(
+                        "POST",
+                        "/reviews",
+                        {
+                            "detection_id": selected["id"],
+                            "label": label,
+                            "notes": notes,
+                            "reviewer_id": "local:operator",
+                            "evidence_sha256": evidence["source_sha256"],
+                            "evidence_path": evidence["path"],
+                        },
+                    )
+                    if saved:
+                        st.success(f"Revisão salva como versão {saved['revision']}.")
+    with pattern_tab:
+        metrics = action("GET", "/metrics/patterns/bearish_engulfing") or {}
+        precision = metrics.get("precision", {})
+        p1, p2, p3 = st.columns(3)
+        p1.metric("Padrão ativo", "Engolfo de baixa")
+        p2.metric(
+            "Precisão revisada",
+            "Amostra insuficiente"
+            if precision.get("value") is None
+            else f"{precision['value'] * 100:.1f}%",
         )
+        p3.metric("Revisões", metrics.get("reviewed_total", 0))
+        st.info(
+            "O catálogo é composto por pacotes externos versionados. A interface lista, explica e mede padrões; ela não funciona como editor visual de estratégias."
+        )
+        with st.expander("Detalhes de qualidade"):
+            st.json(metrics)
+        if operations or protections or approvals:
+            with st.expander("Estado operacional persistido"):
+                st.write(
+                    {"aprovações": approvals, "operações": operations, "proteções": protections}
+                )
+
+
+st.set_page_config(page_title="Providency", page_icon="🛡️", layout="wide")
+inject_style()
+with st.sidebar:
+    st.markdown(
+        '<div class="brand"><div class="brand-mark">P</div><div><div class="brand-name">Providency</div><div class="brand-sub">observe · confirme · proteja</div></div></div>',
+        unsafe_allow_html=True,
+    )
+    page = st.radio("Navegação", NAVIGATION, label_visibility="collapsed")
+    st.divider()
+    st.caption("Aplicativo local · dados no dispositivo")
+try:
+    app_state = api_request("GET", "/state")
+    configuration_state = api_request("GET", "/configuration")
+    vector_health = api_request("GET", "/vector/health")
+    execution_state = api_request("GET", "/execution/status")
+    telegram_state = api_request("GET", "/telegram/status")
+    candidate_items = api_request("GET", "/candidates?limit=100")
+    approval_items = api_request("GET", "/approvals?limit=100")
+    operation_items = api_request("GET", "/operations?limit=100")
+    protection_items = api_request("GET", "/protections?limit=100")
+    event_items = api_request("GET", "/events?limit=200")
+except RuntimeError as exc:
+    st.error(str(exc))
+    st.info("Inicie o Providency pelo launcher e aguarde o Core Engine ficar disponível.")
+    st.stop()
+render_hero(app_state, execution_state["mode"])
+if page == NAVIGATION[0]:
+    render_settings(configuration_state, vector_health, telegram_state)
+elif page == NAVIGATION[1]:
+    render_operation(
+        app_state,
+        configuration_state,
+        vector_health,
+        execution_state,
+        candidate_items,
+        approval_items,
+        operation_items,
+        protection_items,
+    )
+else:
+    render_activities_results(
+        app_state, event_items, candidate_items, approval_items, operation_items, protection_items
+    )

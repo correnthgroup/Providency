@@ -366,6 +366,46 @@ def test_candidate_api_exposes_complete_auditable_preflight(tmp_path: Path) -> N
         assert client.get("/candidates").json()[0]["candidate_id"] == candidate["candidate_id"]
 
 
+def test_configuration_can_be_updated_when_stopped_and_restored(tmp_path: Path) -> None:
+    payload = {
+        "symbol": "WIN",
+        "primary_timeframe": "15m",
+        "context_timeframe": "1h",
+        "trailing_timeframe": "5m",
+        "short_ma_period": 7,
+        "long_ma_period": 70,
+        "quantity": 1,
+        "tick_size": 5,
+        "tick_value": 1,
+        "stop_buffer_ticks": 1,
+        "min_rr": 2,
+        "max_trades": 3,
+        "max_consecutive_losses": 2,
+        "max_session_loss": 100,
+        "pivot_window": 3,
+        "support_resistance_tolerance": 5,
+    }
+    adapter = FakeVectorAdapter(tmp_path / "capture.webp")
+    app = create_app(settings(tmp_path), recover=False, vector_adapter=adapter)
+
+    with TestClient(app) as client:
+        updated = client.put("/configuration", json=payload)
+        assert updated.status_code == 200
+        assert updated.json()["desired"]["symbol"] == "WIN"
+        client.post("/run")
+        blocked = client.put("/configuration", json={**payload, "symbol": "WDO"})
+        assert blocked.status_code == 409
+        client.post("/stop")
+
+    restored_app = create_app(
+        settings(tmp_path),
+        recover=False,
+        vector_adapter=FakeVectorAdapter(tmp_path / "capture-restored.webp"),
+    )
+    with TestClient(restored_app) as client:
+        assert client.get("/configuration").json()["desired"]["symbol"] == "WIN"
+
+
 def test_telegram_approval_rechecks_and_records_would_execute_once(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

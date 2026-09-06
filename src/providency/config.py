@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, fields
 from enum import StrEnum
 from pathlib import Path
 from typing import Any
@@ -107,6 +107,11 @@ class AnalysisConfiguration:
 
     def to_dict(self) -> dict[str, Any]:
         return {**asdict(self), "version": self.version, "missing_fields": self.missing_fields}
+
+    @classmethod
+    def from_mapping(cls, values: dict[str, Any]) -> AnalysisConfiguration:
+        field_names = {field.name for field in fields(cls)}
+        return cls(**{name: values[name] for name in field_names if name in values})
 
     @classmethod
     def from_env(cls) -> AnalysisConfiguration:
