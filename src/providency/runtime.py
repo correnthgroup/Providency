@@ -1,21 +1,35 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import time
 import urllib.error
 import urllib.request
 import webbrowser
+from collections.abc import Callable
 from contextlib import suppress
 from pathlib import Path
 from threading import Event, Thread
+from typing import TYPE_CHECKING
+from uuid import uuid4
 
 import uvicorn
 
-from providency.api import create_app
 from providency.config import Settings
 from providency.locking import InstanceAlreadyRunning, InstanceLock
+from providency.startup import StartupProgress
+
+if TYPE_CHECKING:
+    from fastapi import FastAPI
+
+
+def create_app(settings: Settings, *, request_shutdown: Callable[[], None]) -> FastAPI:
+    # Import the engine only in its own process, after the loading UI is visible.
+    from providency.api import create_app as factory
+
+    return factory(settings, request_shutdown=request_shutdown)
 
 
 def _healthy(url: str) -> bool:
@@ -31,9 +45,16 @@ def _healthy(url: str) -> bool:
         return False
 
 
-def _wait_for_health(url: str, timeout_seconds: float = 20) -> None:
+def _wait_for_health(
+    url: str,
+    timeout_seconds: float = 20,
+    *,
+    process: subprocess.Popen[bytes] | None = None,
+) -> None:
     deadline = time.monotonic() + timeout_seconds
     while time.monotonic() < deadline:
+        if process is not None and process.poll() is not None:
+            raise RuntimeError("Engine exited during startup.")
         if _healthy(url):
             return
         time.sleep(0.2)
@@ -42,6 +63,7 @@ def _wait_for_health(url: str, timeout_seconds: float = 20) -> None:
 
 def run_engine() -> None:
     settings = Settings.from_env()
+
     def request_exit() -> None:
         server.should_exit = True
 
@@ -52,6 +74,7 @@ def run_engine() -> None:
             port=settings.api_port,
             log_level="info",
             use_colors=False,
+            timeout_graceful_shutdown=5,
         )
     )
     server.run()
@@ -62,6 +85,9 @@ def _watch_engine(api_url: str, finished: Event) -> None:
 
     failures = 0
     while not finished.wait(1):
+        progress = StartupProgress(Settings.from_env().data_dir).read()
+        if progress.get("stage") not in {None, "READY"}:
+            continue
         failures = 0 if _healthy(api_url) else failures + 1
         if failures >= 3 and Runtime.exists():
             try:
@@ -147,19 +173,40 @@ def run_launcher() -> None:
     try:
         lock.acquire()
     except InstanceAlreadyRunning:
-        if _healthy(settings.api_url):
+        if _healthy(settings.api_url) or _ui_healthy(ui_url):
             webbrowser.open(ui_url)
             return
         raise
 
     engine: subprocess.Popen[bytes] | None = None
     ui: subprocess.Popen[bytes] | None = None
+    progress = StartupProgress(settings.data_dir)
+    launch_id = uuid4().hex
+    progress.begin(launch_id)
+    previous_launch_id = os.environ.get("PROVIDENCY_LAUNCH_ID")
+    os.environ["PROVIDENCY_LAUNCH_ID"] = launch_id
     try:
-        engine = subprocess.Popen(_role_command("engine"))
-        _wait_for_health(settings.api_url)
         ui_command = _role_command("ui")
         ui = subprocess.Popen(ui_command)
+        _wait_for_ui(ui_url, ui, progress)
+        progress.advance("UI_READY")
         webbrowser.open(ui_url)
+        if progress.cancelled():
+            return
+        progress.advance("STARTING_ENGINE")
+        engine = subprocess.Popen(_role_command("engine"))
+        try:
+            _wait_for_health(settings.api_url, process=engine)
+        except RuntimeError:
+            if engine.poll() == 0:
+                return
+            progress.fail(
+                "Não foi possível iniciar o motor local. Encerre e abra o Providency novamente."
+            )
+            while ui.poll() is None and not progress.cancelled():
+                time.sleep(0.2)
+            return
+        progress.advance("READY")
         while engine.poll() is None:
             if ui.poll() is not None:
                 if _request_engine_shutdown(settings.api_url):
@@ -183,3 +230,30 @@ def run_launcher() -> None:
                     process.kill()
                     process.wait(timeout=5)
         lock.release()
+        if previous_launch_id is None:
+            os.environ.pop("PROVIDENCY_LAUNCH_ID", None)
+        else:
+            os.environ["PROVIDENCY_LAUNCH_ID"] = previous_launch_id
+
+
+def _ui_healthy(ui_url: str) -> bool:
+    try:
+        with urllib.request.urlopen(f"{ui_url}/_stcore/health", timeout=0.5) as response:
+            return bool(response.status == 200)
+    except (OSError, urllib.error.URLError):
+        return False
+
+
+def _wait_for_ui(
+    ui_url: str,
+    ui: subprocess.Popen[bytes],
+    progress: StartupProgress,
+) -> None:
+    deadline = time.monotonic() + 40
+    while time.monotonic() < deadline:
+        if _ui_healthy(ui_url):
+            return
+        if ui.poll() is not None or progress.cancelled():
+            raise RuntimeError("Providency interface did not start.")
+        time.sleep(0.2)
+    raise RuntimeError("Providency interface startup timed out.")

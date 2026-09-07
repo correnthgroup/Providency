@@ -24,6 +24,7 @@ def test_engine_disables_terminal_colors_for_windowed_package(
     class Server:
         def __init__(self, config: Any) -> None:
             observed["use_colors"] = config.use_colors
+            observed["shutdown_timeout"] = config.timeout_graceful_shutdown
 
         def run(self) -> None:
             pass
@@ -33,6 +34,7 @@ def test_engine_disables_terminal_colors_for_windowed_package(
     runtime.run_engine()
 
     assert observed["use_colors"] is False
+    assert observed["shutdown_timeout"] == 5
 
 
 def test_streamlit_is_forced_out_of_development_mode() -> None:
@@ -46,7 +48,8 @@ def test_launcher_binds_streamlit_to_localhost(tmp_path: Path, monkeypatch: Any)
     commands: list[list[str]] = []
 
     monkeypatch.setattr(runtime.Settings, "from_env", lambda: settings)
-    monkeypatch.setattr(runtime, "_wait_for_health", lambda _url: None)
+    monkeypatch.setattr(runtime, "_wait_for_health", lambda _url, **_kwargs: None)
+    monkeypatch.setattr(runtime, "_wait_for_ui", lambda *_args: None)
     monkeypatch.setattr(runtime.webbrowser, "open", lambda _url: True)
 
     def start(command: list[str]) -> CompletedProcess:
@@ -57,7 +60,7 @@ def test_launcher_binds_streamlit_to_localhost(tmp_path: Path, monkeypatch: Any)
 
     runtime.run_launcher()
 
-    assert commands[1][-1] == "providency.ui_server"
+    assert commands[0][-1] == "providency.ui_server"
     options = runtime._streamlit_options(settings)
     assert options[options.index("--server.address") + 1] == "127.0.0.1"
     assert options[options.index("--browser.gatherUsageStats") + 1] == "false"

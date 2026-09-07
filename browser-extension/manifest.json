@@ -1,0 +1,11 @@
+{
+  "manifest_version": 3,
+  "name": "Providency — Conexão local",
+  "version": "0.9.0",
+  "description": "Conecta Vector e Telegram Web ao Providency no seu computador.",
+  "minimum_chrome_version": "125",
+  "permissions": ["debugger"],
+  "host_permissions": ["https://web.vectorcrypto.com/*", "https://web.telegram.org/*"],
+  "background": {"service_worker": "background.js"},
+  "action": {"default_popup": "popup.html", "default_title": "Conectar ao Providency"}
+}

@@ -26,6 +26,7 @@ from providency.context import (
 from providency.evidence import EvidenceSanitizer, RedactionRegion
 from providency.execution import DemoExecutionService
 from providency.metrics import pattern_metrics
+from providency.onboarding import Onboarding
 from providency.patterns import Candle, PatternMatcher, PatternPackage
 from providency.protection import PositionProtectionService
 from providency.reporting import build_session_report, export_session_report
@@ -157,6 +158,7 @@ def create_app(
     request_shutdown: Callable[[], None] | None = None,
 ) -> FastAPI:
     resolved = settings or Settings.from_env()
+    onboarding = Onboarding(resolved)
     service = EngineService(Storage(resolved.database_path), recover=recover)
     adapter = vector_adapter or VectorAdapter(resolved)
     matcher = PatternMatcher(
@@ -209,8 +211,10 @@ def create_app(
                 with suppress(asyncio.CancelledError):
                     await task
             await adapter.stop()
+            await onboarding.close()
 
-    app = FastAPI(title="Providency Core Engine", version="0.8.2", lifespan=lifespan)
+    app = FastAPI(title="Providency Core Engine", version="0.9.0", lifespan=lifespan)
+    onboarding.install(app)
 
     @app.middleware("http")
     async def lifecycle_guard(

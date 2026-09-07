@@ -19,6 +19,24 @@ from providency.config import Settings
 from providency.context import PriceAnchor
 
 
+async def discover_browser_charts(pages: list[Any]) -> list[dict[str, Any]]:
+    """Read internal Vector tabs without activating or changing any chart."""
+    charts: list[dict[str, Any]] = []
+    for page_index, page in enumerate(pages):
+        rows = await page.locator('[data-testid="asset-tab"]').evaluate_all('''tabs =>
+            tabs.map(tab => ({
+                symbol: tab.querySelector('.title-ticker')?.textContent?.trim(),
+                timeframe: tab.querySelector('.title-period')?.textContent?.trim(),
+                key: tab.getAttribute('str-asset-key-entity'),
+                active: tab.classList.contains('asset-tabs-component__tab--active')
+            }))''')
+        for index, row in enumerate(rows):
+            if not row.get('symbol') or not row.get('timeframe') or not row.get('key'):
+                raise ValueError('Não foi possível identificar todos os gráficos da Vector.')
+            charts.append({**row, 'id': f'{page_index}:{index}:{row["key"]}'})
+    return charts
+
+
 class CaptureDisposition(StrEnum):
     USABLE = "USABLE"
     NO_DECISION = "NO_DECISION"

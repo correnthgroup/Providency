@@ -11,8 +11,8 @@ import streamlit as st
 
 from providency import __version__
 from providency.config import Settings
+from providency.onboarding_ui import loading_screen, render_onboarding
 from providency.ui_model import (
-    NAVIGATION,
     OPERATION_STAGES,
     desired_applied_rows,
     human_datetime,
@@ -587,12 +587,13 @@ def render_activities_results(
 
 st.set_page_config(page_title="Providency", page_icon="🛡️", layout="wide")
 inject_style()
+loading_screen()
 with st.sidebar:
     st.markdown(
         '<div class="brand"><div class="brand-mark">P</div><div><div class="brand-name">Providency</div><div class="brand-sub">observe · confirme · proteja</div></div></div>',
         unsafe_allow_html=True,
     )
-    page = st.radio("Navegação", NAVIGATION, label_visibility="collapsed")
+    page = st.radio("Navegação", ("Início", "Conexões", "Configurações", "Atividades"), label_visibility="collapsed")
     st.divider()
     st.caption(f"Providency {__version__} · dados no dispositivo")
     st.caption("Fechar esta aba mantém o aplicativo em execução.")
@@ -604,6 +605,9 @@ with st.sidebar:
         st.session_state["shutdown_requested"] = True
 if st.session_state.get("shutdown_requested"):
     st.success("Encerramento solicitado. O Providency está finalizando os processos; você pode fechar esta aba.")
+    st.stop()
+if page in {"Início", "Conexões"}:
+    render_onboarding(action)
     st.stop()
 try:
     app_state = api_request("GET", "/state")
@@ -621,19 +625,19 @@ except RuntimeError as exc:
     st.info("Inicie o Providency pelo launcher e aguarde o Core Engine ficar disponível.")
     st.stop()
 render_hero(app_state, execution_state["mode"])
-if page == NAVIGATION[0]:
+if page == "Configura\u00e7\u00f5es":
     render_settings(configuration_state, vector_health, telegram_state)
-elif page == NAVIGATION[1]:
-    render_operation(
-        app_state,
-        configuration_state,
-        vector_health,
-        execution_state,
-        candidate_items,
-        approval_items,
-        operation_items,
-        protection_items,
-    )
+    with st.expander("Operação avançada"):
+        render_operation(
+            app_state,
+            configuration_state,
+            vector_health,
+            execution_state,
+            candidate_items,
+            approval_items,
+            operation_items,
+            protection_items,
+        )
 else:
     render_activities_results(
         app_state, event_items, candidate_items, approval_items, operation_items, protection_items

@@ -37,6 +37,10 @@ def pyinstaller_command(platform: str = sys.platform, *, clean: bool = True) -> 
         "playwright",
         "--hidden-import",
         "providency.ui_model",
+        "--hidden-import",
+        "providency.onboarding_ui",
+        "--add-data",
+        f"{ROOT / 'src' / 'providency' / 'loading_assets'}{separator}providency/loading_assets",
         "--add-data",
         f"{ROOT / 'patterns'}{separator}providency/pattern_catalog",
         "--add-data",
@@ -76,6 +80,7 @@ def build(*, clean: bool = True) -> Path:
     else:
         shutil.copy2(built, destination)
     shutil.copytree(ROOT / "assets", RELEASE / "assets", dirs_exist_ok=True)
+    shutil.copytree(ROOT / "browser-extension", RELEASE / "browser-extension", dirs_exist_ok=True)
     shutil.copy2(ROOT / "packaging" / "README.txt", RELEASE / "README.txt")
     return RELEASE
 
