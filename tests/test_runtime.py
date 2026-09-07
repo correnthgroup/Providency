@@ -19,12 +19,16 @@ def test_engine_disables_terminal_colors_for_windowed_package(
     settings = Settings(data_dir=tmp_path)
     observed: dict[str, Any] = {}
     monkeypatch.setattr(runtime.Settings, "from_env", lambda: settings)
-    monkeypatch.setattr(runtime, "create_app", lambda _settings: "app")
-    monkeypatch.setattr(
-        runtime.uvicorn,
-        "run",
-        lambda app, **kwargs: observed.update({"app": app, **kwargs}),
-    )
+    monkeypatch.setattr(runtime, "create_app", lambda _settings, **kwargs: "app")
+
+    class Server:
+        def __init__(self, config: Any) -> None:
+            observed["use_colors"] = config.use_colors
+
+        def run(self) -> None:
+            pass
+
+    monkeypatch.setattr(runtime.uvicorn, "Server", Server)
 
     runtime.run_engine()
 
@@ -53,6 +57,7 @@ def test_launcher_binds_streamlit_to_localhost(tmp_path: Path, monkeypatch: Any)
 
     runtime.run_launcher()
 
-    ui_command = commands[1]
-    assert ui_command[ui_command.index("--server.address") + 1] == "127.0.0.1"
-    assert ui_command[ui_command.index("--browser.gatherUsageStats") + 1] == "false"
+    assert commands[1][-1] == "providency.ui_server"
+    options = runtime._streamlit_options(settings)
+    assert options[options.index("--server.address") + 1] == "127.0.0.1"
+    assert options[options.index("--browser.gatherUsageStats") + 1] == "false"

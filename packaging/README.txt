@@ -12,6 +12,15 @@ Se o Providency já estiver em execução, um segundo clique apenas abrirá o pa
 existente. O aplicativo mantém um único Core Engine, banco SQLite, listener do
 Telegram e navegador controlado por perfil do sistema operacional.
 
+COMO ENCERRAR
+-------------
+Fechar a aba do navegador não encerra o aplicativo.
+PARAR interrompe somente a sessão de observação.
+Use "Encerrar Providency" no menu lateral para finalizar os processos e fechar
+a Vector controlada. O histórico e o perfil de login são preservados.
+Se houver operação pendente ou posição demo sob gerenciamento, resolva-a antes
+de encerrar. Este botão não envia ordens e não é uma parada de emergência.
+
 PRIMEIRO USO
 ------------
 1. Abra Parâmetros e Configurações.

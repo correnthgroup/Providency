@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager, suppress
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Query, Request, Response
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from providency.approvals import ApprovalError, ApprovalService, render_proposal
@@ -72,6 +73,10 @@ class CandidateEvaluationPayload(BaseModel):
 
 class EmergencyStopPayload(BaseModel):
     confirm_demo_close: bool = False
+
+
+class ShutdownPayload(BaseModel):
+    confirm: Literal[True]
 
 
 class RedactionPayload(BaseModel):
@@ -149,6 +154,7 @@ def create_app(
     vector_adapter: VectorAdapterContract | None = None,
     telegram_client: TelegramClientContract | None = None,
     telegram_polling: bool = True,
+    request_shutdown: Callable[[], None] | None = None,
 ) -> FastAPI:
     resolved = settings or Settings.from_env()
     service = EngineService(Storage(resolved.database_path), recover=recover)
@@ -184,6 +190,9 @@ def create_app(
     telegram_offset: int | None = None
     telegram_poll_error = False
     stop_polling = asyncio.Event()
+    shutting_down = False
+    active_commands = 0
+    active_callbacks = 0
     service.storage.record_configuration(configuration.version, configuration.to_dict())
 
     @asynccontextmanager
@@ -201,7 +210,76 @@ def create_app(
                     await task
             await adapter.stop()
 
-    app = FastAPI(title="Providency Core Engine", version="0.8.1", lifespan=lifespan)
+    app = FastAPI(title="Providency Core Engine", version="0.8.2", lifespan=lifespan)
+
+    @app.middleware("http")
+    async def lifecycle_guard(
+        request: Request, call_next: Callable[[Request], Awaitable[Response]]
+    ) -> Response:
+        nonlocal active_commands
+        command = request.method not in {"GET", "HEAD", "OPTIONS"}
+        if not command or request.url.path == "/shutdown":
+            return await call_next(request)
+        if shutting_down:
+            return JSONResponse(
+                status_code=409,
+                content={"detail": {"human_message": "O Providency está encerrando."}},
+            )
+        active_commands += 1
+        try:
+            return await call_next(request)
+        finally:
+            active_commands -= 1
+
+    @app.post("/shutdown", status_code=202)
+    async def shutdown(
+        payload: ShutdownPayload, request: Request, background: BackgroundTasks
+    ) -> dict[str, str]:
+        nonlocal shutting_down
+        allowed_origins = {
+            f"http://127.0.0.1:{resolved.ui_port}",
+            f"http://localhost:{resolved.ui_port}",
+        }
+        origin = request.headers.get("origin")
+        if origin is not None and origin not in allowed_origins:
+            raise HTTPException(status_code=403, detail="Use o painel local do Providency.")
+        if request_shutdown is None:
+            raise HTTPException(status_code=409, detail="Inicie o aplicativo pelo launcher.")
+        if shutting_down:
+            return {"status": "SHUTTING_DOWN"}
+        if active_commands or active_callbacks:
+            raise HTTPException(
+                status_code=409,
+                detail="Aguarde o comando em andamento terminar e tente encerrar novamente.",
+            )
+        if (
+            service.storage.open_operations()
+            or service.storage.filled_operations_requiring_recovery()
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Há uma operação pendente ou posição demo sob gerenciamento. "
+                    "Resolva a operação e confirme o encerramento da posição antes de sair."
+                ),
+            )
+        # No await between the preconditions and the guard: callbacks cannot enter here.
+        shutting_down = True
+        stop_polling.set()
+        session = service.storage.running_session()
+        if session:
+            approvals.cancel_session(str(session["id"]), "Providency is shutting down.")
+        service.stop()
+        service.storage.record_event(
+            session_id=str(session["id"]) if session else None,
+            level="INFO",
+            component="runtime",
+            event_type="APPLICATION_SHUTDOWN_REQUESTED",
+            message="Providency shutdown requested by the local operator.",
+        )
+        # Uvicorn drains requests and runs lifespan cleanup after sending this response.
+        background.add_task(request_shutdown)
+        return {"status": "SHUTTING_DOWN"}
 
     def vector_error(exc: VectorAdapterError) -> HTTPException:
         session = service.storage.running_session()
@@ -808,10 +886,17 @@ def create_app(
         return finished
 
     async def process_callback(callback_data: str, *, chat_id: int, user_id: int) -> dict[str, Any]:
-        approval = approvals.consume(callback_data, chat_id=chat_id, user_id=user_id)
-        if approval["status"] == "APPROVED":
-            return await finish_approved_recheck(approval)
-        return approval
+        nonlocal active_callbacks
+        if shutting_down:
+            raise ApprovalError("Providency is shutting down.")
+        active_callbacks += 1
+        try:
+            approval = approvals.consume(callback_data, chat_id=chat_id, user_id=user_id)
+            if approval["status"] == "APPROVED":
+                return await finish_approved_recheck(approval)
+            return approval
+        finally:
+            active_callbacks -= 1
 
     async def poll_once() -> list[dict[str, Any]]:
         nonlocal telegram_offset

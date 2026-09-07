@@ -9,6 +9,7 @@ from typing import Any
 
 import streamlit as st
 
+from providency import __version__
 from providency.config import Settings
 from providency.ui_model import (
     NAVIGATION,
@@ -593,7 +594,17 @@ with st.sidebar:
     )
     page = st.radio("Navegação", NAVIGATION, label_visibility="collapsed")
     st.divider()
-    st.caption("Aplicativo local · dados no dispositivo")
+    st.caption(f"Providency {__version__} · dados no dispositivo")
+    st.caption("Fechar esta aba mantém o aplicativo em execução.")
+    if st.button(
+        "Encerrar Providency",
+        width="stretch",
+        help="Encerra a sessão, a Vector controlada e os processos do aplicativo. Seus dados são preservados.",
+    ) and action("POST", "/shutdown", {"confirm": True}) is not None:
+        st.session_state["shutdown_requested"] = True
+if st.session_state.get("shutdown_requested"):
+    st.success("Encerramento solicitado. O Providency está finalizando os processos; você pode fechar esta aba.")
+    st.stop()
 try:
     app_state = api_request("GET", "/state")
     configuration_state = api_request("GET", "/configuration")

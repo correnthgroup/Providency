@@ -1227,10 +1227,14 @@ class VectorAdapter:
 
     async def stop(self) -> None:
         async with self._lock:
-            if self._context is not None:
-                await self._context.close()
-            if self._playwright is not None:
-                await self._playwright.stop()
-            self._page = None
-            self._context = None
-            self._playwright = None
+            try:
+                try:
+                    if self._context is not None:
+                        await self._context.close()
+                finally:
+                    if self._playwright is not None:
+                        await self._playwright.stop()
+            finally:
+                self._page = None
+                self._context = None
+                self._playwright = None

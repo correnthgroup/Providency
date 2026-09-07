@@ -36,6 +36,18 @@ uv run providency-launcher
 O launcher inicia o Core Engine e a UI. O estado inicial é `STOPPED`; uma sessão
 operacional só começa após `RUN`.
 
+### Parar e encerrar
+
+Fechar a aba do navegador mantém o Providency em execução. **PARAR** encerra
+somente a sessão. Use **Encerrar Providency**, no menu lateral, para cancelar
+aprovações pendentes da sessão, finalizar o Core Engine, fechar a Vector
+controlada e encerrar o servidor Streamlit e o launcher. O histórico e o perfil
+de login são preservados. A aba do painel pode ser fechada após o pedido.
+
+O encerramento aguarda comandos em andamento e é bloqueado se houver operação
+pendente ou posição demo ainda sob gerenciamento. Ele não envia ordens nem
+substitui a parada de emergência. Ao abrir novamente, o aplicativo começa parado.
+
 ## Captura da Vector Web
 
 Defina `PROVIDENCY_VECTOR_URL` no ambiente. Abra a Vector pela UI, conclua o

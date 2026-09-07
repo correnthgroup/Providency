@@ -7,7 +7,9 @@ import time
 import urllib.error
 import urllib.request
 import webbrowser
+from contextlib import suppress
 from pathlib import Path
+from threading import Event, Thread
 
 import uvicorn
 
@@ -40,13 +42,48 @@ def _wait_for_health(url: str, timeout_seconds: float = 20) -> None:
 
 def run_engine() -> None:
     settings = Settings.from_env()
-    uvicorn.run(
-        create_app(settings),
-        host=settings.api_host,
-        port=settings.api_port,
-        log_level="info",
-        use_colors=False,
+    def request_exit() -> None:
+        server.should_exit = True
+
+    server = uvicorn.Server(
+        uvicorn.Config(
+            create_app(settings, request_shutdown=request_exit),
+            host=settings.api_host,
+            port=settings.api_port,
+            log_level="info",
+            use_colors=False,
+        )
     )
+    server.run()
+
+
+def _watch_engine(api_url: str, finished: Event) -> None:
+    from streamlit.runtime import Runtime
+
+    failures = 0
+    while not finished.wait(1):
+        failures = 0 if _healthy(api_url) else failures + 1
+        if failures >= 3 and Runtime.exists():
+            try:
+                Runtime.instance().stop()
+                return
+            except RuntimeError:
+                # Runtime exists before its event loop is ready during startup.
+                continue
+
+
+def _request_engine_shutdown(api_url: str) -> bool:
+    request = urllib.request.Request(
+        f"{api_url}/shutdown",
+        method="POST",
+        data=b'{"confirm": true}',
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=5) as response:
+            return bool(response.status == 202)
+    except (OSError, urllib.error.URLError):
+        return False
 
 
 def _streamlit_options(settings: Settings) -> list[str]:
@@ -85,7 +122,14 @@ def run_ui() -> None:
         str(package_dir / "ui.py"),
         *_streamlit_options(settings),
     ]
-    streamlit_cli.main()
+    finished = Event()
+    watcher = Thread(target=_watch_engine, args=(settings.api_url, finished), daemon=True)
+    watcher.start()
+    try:
+        streamlit_cli.main()
+    finally:
+        finished.set()
+        watcher.join(timeout=2)
 
 
 def _role_command(role: str) -> list[str]:
@@ -93,7 +137,7 @@ def _role_command(role: str) -> list[str]:
         return [sys.executable, f"--{role}"]
     if role == "engine":
         return [sys.executable, "-m", "providency.engine"]
-    return [sys.executable, "-m", "streamlit", "run", str(Path(__file__).parent / "ui.py")]
+    return [sys.executable, "-m", "providency.ui_server"]
 
 
 def run_launcher() -> None:
@@ -114,11 +158,21 @@ def run_launcher() -> None:
         engine = subprocess.Popen(_role_command("engine"))
         _wait_for_health(settings.api_url)
         ui_command = _role_command("ui")
-        if not getattr(sys, "frozen", False):
-            ui_command.extend(_streamlit_options(settings))
         ui = subprocess.Popen(ui_command)
         webbrowser.open(ui_url)
-        ui.wait()
+        while engine.poll() is None:
+            if ui.poll() is not None:
+                if _request_engine_shutdown(settings.api_url):
+                    engine.wait(timeout=20)
+                    break
+                # If a demo position blocks shutdown, restore the control panel.
+                ui = subprocess.Popen(ui_command)
+                webbrowser.open(ui_url)
+                time.sleep(1)
+            time.sleep(0.2)
+        # run_ui observes the stopped engine and shuts Streamlit down gracefully.
+        with suppress(subprocess.TimeoutExpired):
+            ui.wait(timeout=10)
     finally:
         for process in (ui, engine):
             if process is not None and process.poll() is None:
@@ -127,4 +181,5 @@ def run_launcher() -> None:
                     process.wait(timeout=5)
                 except subprocess.TimeoutExpired:
                     process.kill()
+                    process.wait(timeout=5)
         lock.release()
