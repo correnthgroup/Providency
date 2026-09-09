@@ -23,17 +23,17 @@ async def discover_browser_charts(pages: list[Any]) -> list[dict[str, Any]]:
     """Read internal Vector tabs without activating or changing any chart."""
     charts: list[dict[str, Any]] = []
     for page_index, page in enumerate(pages):
-        rows = await page.locator('[data-testid="asset-tab"]').evaluate_all('''tabs =>
+        rows = await page.locator('[data-testid="asset-tab"]').evaluate_all("""tabs =>
             tabs.map(tab => ({
                 symbol: tab.querySelector('.title-ticker')?.textContent?.trim(),
                 timeframe: tab.querySelector('.title-period')?.textContent?.trim(),
                 key: tab.getAttribute('str-asset-key-entity'),
                 active: tab.classList.contains('asset-tabs-component__tab--active')
-            }))''')
+            }))""")
         for index, row in enumerate(rows):
-            if not row.get('symbol') or not row.get('timeframe') or not row.get('key'):
-                raise ValueError('Não foi possível identificar todos os gráficos da Vector.')
-            charts.append({**row, 'id': f'{page_index}:{index}:{row["key"]}'})
+            if not row.get("symbol") or not row.get("timeframe") or not row.get("key"):
+                raise ValueError("Não foi possível identificar todos os gráficos da Vector.")
+            charts.append({**row, "id": f"{page_index}:{index}:{row['key']}"})
     return charts
 
 
@@ -309,9 +309,7 @@ class VectorStateSynchronizer:
                 missing.append(f"moving_average:{period}")
         if desired.require_price_scale and len(price_anchors) < 2:
             missing.append("price_scale")
-        return AppliedVectorState(
-            symbol, timeframe, moving_averages, tuple(missing), price_anchors
-        )
+        return AppliedVectorState(symbol, timeframe, moving_averages, tuple(missing), price_anchors)
 
     async def sync(self, desired: DesiredVectorState) -> StateSyncResult:
         pre = await self.observe(desired)
@@ -984,6 +982,119 @@ class VectorAdapterError(RuntimeError):
 
 
 class VectorAdapter:
+    @staticmethod
+    async def read_browser_settings(pages: list[Any]) -> dict[str, Any]:
+        """Read the current order ticket, including open shadow-root inputs, without clicks."""
+        from providency.vector_settings import parse_display_number
+
+        charts = await discover_browser_charts(pages)
+        sources: list[tuple[Any, Any, dict[str, Any]]] = []
+        for page_index, page in enumerate(pages):
+            active_charts = [
+                c for c in charts if c["active"] and c["id"].startswith(f"{page_index}:")
+            ]
+            for panel in await page.locator(".graphic-order-crypto").all():
+                if await panel.is_visible():
+                    if len(active_charts) != 1:
+                        raise ValueError(
+                            "Deixe um único gráfico ativo na tela de ordens da Vector."
+                        )
+                    sources.append((page, panel, active_charts[0]))
+        if len(sources) != 1:
+            raise ValueError("Deixe uma única tela de ordens da Vector visível para atualizar.")
+        page, panel, active = sources[0]
+        chart_signature = [(c["id"], c["active"]) for c in charts]
+        account = panel.locator('[data-testid="account-selector-name"]')
+        if await account.count() != 1 or not await account.is_visible():
+            raise ValueError("Não foi possível identificar a conta da tela de ordens.")
+        account_before = await account.inner_text()
+        raw: dict[str, dict[str, Any]] = {}
+        for name, suffix in (("price", "price"), ("quantity", "quantity"), ("total", "total")):
+            host = panel.locator(f'[onboarding-id="chart-input-{suffix}"] input-number')
+            if await host.count() != 1 or not await host.is_visible():
+                raise ValueError("Deixe preço, quantidade e total visíveis na tela de ordens.")
+            control = host.locator("input")
+            value = await control.input_value()
+            parsed = parse_display_number(value, decimal_separator=",")
+            if parsed is None or parsed < 0:
+                raise ValueError("A Vector apresentou um valor numérico ilegível na ordem.")
+            raw[name] = {
+                "value": parsed,
+                "text": value,
+                "unit": await host.get_attribute("str-complementary-info"),
+                "step": parse_display_number(
+                    await host.get_attribute("step") or "", decimal_separator="."
+                ),
+            }
+        base, separator, quote = active["symbol"].partition("/")
+        if (
+            not separator
+            or raw["quantity"]["unit"] != base
+            or raw["price"]["unit"] != quote
+            or raw["total"]["unit"] != quote
+        ):
+            raise ValueError("O ativo do gráfico e as unidades da ordem não correspondem.")
+        if abs(raw["price"]["value"] * raw["quantity"]["value"] - raw["total"]["value"]) > 0.011:
+            raise ValueError(
+                "Preço, quantidade e total mudaram durante a leitura. Atualize novamente."
+            )
+        balances = []
+        for row in await page.locator(
+            '.asset-position__crypto-info .info:has(.key[data-key="qty"])'
+        ).all():
+            if await row.is_visible() and (await row.locator(".key").inner_text()).strip() == quote:
+                value = parse_display_number(
+                    await row.locator(".value").inner_text(), decimal_separator=","
+                )
+                if value is not None and value >= 0:
+                    balances.append(value)
+        fields: dict[str, Any] = {
+            "symbol": active["symbol"],
+            "primary_timeframe": active["timeframe"],
+            "quantity": raw["quantity"]["value"],
+        }
+        notes = []
+        if raw["price"]["step"] is not None and raw["price"]["step"] > 0:
+            fields["tick_size"] = raw["price"]["step"]
+        # The spot ticket expresses price in quote currency per base unit. Do not
+        # apply that identity to leveraged products or hidden/unknown balances.
+        leveraged = panel.locator(".leverage")
+        spot = await leveraged.count() == 1 and not await leveraged.is_visible()
+        if spot and len(balances) == 1 and "tick_size" in fields:
+            fields["tick_value"] = fields["tick_size"]
+            notes.append("Valor do tick por unidade do ativo, na moeda da ordem spot.")
+        balance = {"amount": balances[0], "currency": quote} if len(balances) == 1 else None
+        if balance is None:
+            notes.append(
+                "Saldo disponível não identificado de forma única; nenhum saldo presumido."
+            )
+        for name, suffix in (("price", "price"), ("quantity", "quantity"), ("total", "total")):
+            if (
+                await panel.locator(
+                    f'[onboarding-id="chart-input-{suffix}"] input-number input'
+                ).input_value()
+                != raw[name]["text"]
+            ):
+                raise ValueError(
+                    "Os valores da ordem mudaram durante a leitura. Atualize novamente."
+                )
+        after = await discover_browser_charts(pages)
+        if (
+            chart_signature != [(c["id"], c["active"]) for c in after]
+            or account_before != await account.inner_text()
+        ):
+            raise ValueError("A conta ou o gráfico mudou durante a leitura. Atualize novamente.")
+        return {
+            "observed_at": datetime.now(UTC).isoformat(),
+            "charts": charts,
+            "fields": fields,
+            "balance": balance,
+            "order": raw,
+            "notes": notes,
+            "account_fingerprint": hashlib.sha256(account_before.encode()).hexdigest(),
+            "source": "Vector Web · tela de ordens",
+        }
+
     def __init__(self, settings: Settings, *, selectors: VectorSelectors | None = None) -> None:
         self.settings = settings
         self.selectors = selectors or VectorSelectors.from_env()

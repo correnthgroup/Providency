@@ -121,132 +121,46 @@ def render_hero(state: dict[str, Any], mode: str) -> None:
 def configuration_payload(desired: dict[str, Any]) -> dict[str, Any] | None:
     with st.form("analysis-configuration"):
         st.markdown("#### Mercado e leitura visual")
-        c1, c2, c3, c4 = st.columns(4)
-        symbol = c1.text_input(
-            "Ativo",
-            value=str(desired.get("symbol") or ""),
-            help="Símbolo exatamente como aparece no gráfico da Vector Web.",
-        )
-        primary = c2.text_input(
-            "Timeframe principal",
-            value=str(desired.get("primary_timeframe") or ""),
-            help="Período em que o padrão principal será procurado, por exemplo 15m ou 4H.",
-        )
-        context = c3.text_input(
-            "Timeframe de contexto",
-            value=str(desired.get("context_timeframe") or ""),
-            help="Período independente usado para confirmar contexto e estrutura.",
-        )
-        trailing = c4.text_input(
-            "Timeframe de trailing",
-            value=str(desired.get("trailing_timeframe") or ""),
-            help="Período cujos candles fechados orientam o trailing stop.",
-        )
-        ma_enabled = st.checkbox(
-            "Usar médias móveis",
-            value=desired.get("short_ma_period") is not None,
-            help="Quando desabilitado, o Providency preserva as médias já aplicadas sempre que possível.",
-        )
-        m1, m2, m3 = st.columns(3)
-        short_ma = m1.number_input(
-            "Média curta",
-            min_value=1,
-            value=int(desired.get("short_ma_period") or 7),
-            disabled=not ma_enabled,
-            help="Período da média rápida usada na leitura de tendência.",
-        )
-        long_ma = m2.number_input(
-            "Média longa",
-            min_value=1,
-            value=int(desired.get("long_ma_period") or 70),
-            disabled=not ma_enabled,
-            help="Período da média lenta usada na leitura de tendência.",
-        )
-        pivot_window = m3.number_input(
-            "Janela de pivô",
-            min_value=1,
-            value=int(desired.get("pivot_window") or 3),
-            help="Quantidade de candles vizinhos usada para reconhecer pivôs de estrutura.",
-        )
-        st.markdown("#### Gerenciamento e limites")
-        r1, r2, r3, r4 = st.columns(4)
-        quantity = r1.number_input(
-            "Quantidade",
-            min_value=0,
-            value=int(desired.get("quantity") or 0),
-            help="Número de contratos da proposta. Zero bloqueia novas operações.",
-        )
-        tick_size = r2.number_input(
-            "Tamanho do tick",
-            min_value=0.0,
-            value=float(desired.get("tick_size") or 0),
-            format="%.6f",
-            help="Menor variação válida de preço do ativo.",
-        )
-        tick_value = r3.number_input(
-            "Valor do tick",
-            min_value=0.0,
-            value=float(desired.get("tick_value") or 0),
-            format="%.4f",
-            help="Valor financeiro de um tick por contrato.",
-        )
-        stop_buffer = r4.number_input(
-            "Buffer do stop (ticks)",
-            min_value=0,
-            value=int(desired.get("stop_buffer_ticks") or 0),
-            help="Margem adicionada à regra técnica de stop do padrão.",
-        )
-        l1, l2, l3, l4 = st.columns(4)
-        min_rr = l1.number_input(
-            "Risco/retorno mínimo",
-            min_value=0.1,
-            value=float(desired.get("min_rr") or 2),
-            help="Relação mínima entre ganho de referência e risco aceito.",
-        )
-        max_trades = l2.number_input(
-            "Máximo de operações",
-            min_value=0,
-            value=int(desired.get("max_trades") or 0),
-            help="Quantidade máxima de operações permitidas na sessão.",
-        )
-        max_losses = l3.number_input(
-            "Perdas consecutivas",
-            min_value=0,
-            value=int(desired.get("max_consecutive_losses") or 0),
-            help="Ao atingir este limite, novas propostas são bloqueadas.",
-        )
-        max_loss = l4.number_input(
-            "Perda máxima da sessão",
-            min_value=0.0,
-            value=float(desired.get("max_session_loss") or 0),
-            help="Limite financeiro acumulado que interrompe novas entradas.",
-        )
-        tolerance = st.number_input(
-            "Tolerância de suporte/resistência",
-            min_value=0.0,
-            value=float(desired.get("support_resistance_tolerance") or 0),
-            help="Distância máxima para considerar o preço compatível com uma região estrutural.",
-        )
+        st.caption("Preenchido pelo botão Atualizar a partir da tela atual da Vector.")
+        c1, c2, c3 = st.columns(3)
+        symbol = c1.text_input("Ativo", value=str(desired.get("symbol") or ""), disabled=True)
+        primary = c2.text_input("Timeframe principal", value=str(desired.get("primary_timeframe") or ""), disabled=True)
+        quantity = c3.number_input("Quantidade", min_value=0.0, value=float(desired.get("quantity") or 0), format="%.8f", disabled=True)
+        t1, t2 = st.columns(2)
+        tick_size = float(desired.get("tick_size") or 0)
+        t1.text_input("Tamanho do tick", value=str(tick_size) if tick_size > 0 else "Não identificado", disabled=True)
+        tick_value = float(desired.get("tick_value") or 0)
+        t2.text_input("Valor do tick por unidade", value=str(tick_value) if tick_value > 0 else "Não identificado", disabled=True)
+        st.markdown("#### Limites definidos por você")
+        r1, r2, r3 = st.columns(3)
+        min_rr = r1.number_input("Risco/retorno mínimo", min_value=0.1, value=float(desired.get("min_rr") or 2))
+        max_trades = r2.number_input("Máximo de operações diárias", min_value=0, value=int(desired.get("max_trades") or 0))
+        max_losses = r3.number_input("Perdas consecutivas", min_value=0, value=int(desired.get("max_consecutive_losses") or 0))
+        with st.expander("Ajustes avançados de leitura e limites"):
+            st.caption("Estas regras não são informadas pela tela de ordens. Valores existentes são preservados ao atualizar.")
+            c1, c2 = st.columns(2)
+            context = c1.text_input("Timeframe de contexto", value=str(desired.get("context_timeframe") or ""))
+            trailing = c2.text_input("Timeframe de trailing", value=str(desired.get("trailing_timeframe") or ""))
+            ma_enabled = st.checkbox("Usar médias móveis", value=desired.get("short_ma_period") is not None)
+            m1, m2, m3 = st.columns(3)
+            short_ma = m1.number_input("Média curta", min_value=1, value=int(desired.get("short_ma_period") or 7), disabled=not ma_enabled)
+            long_ma = m2.number_input("Média longa", min_value=1, value=int(desired.get("long_ma_period") or 70), disabled=not ma_enabled)
+            pivot_window = m3.number_input("Janela de pivô", min_value=1, value=int(desired.get("pivot_window") or 3))
+            stop_buffer = st.number_input("Buffer do stop (ticks)", min_value=0, value=int(desired.get("stop_buffer_ticks") or 0))
+            max_loss = st.number_input("Perda máxima da sessão", min_value=0.0, value=float(desired.get("max_session_loss") or 0), help="Limite financeiro escolhido pelo operador; não é igual ao saldo disponível.")
+            tolerance = st.number_input("Tolerância de suporte/resistência", min_value=0.0, value=float(desired.get("support_resistance_tolerance") or 0))
         submitted = st.form_submit_button("Salvar parâmetros", type="primary")
     if not submitted:
         return None
     return {
-        "schema_version": 1,
-        "symbol": symbol.strip(),
-        "primary_timeframe": primary.strip(),
-        "context_timeframe": context.strip(),
-        "trailing_timeframe": trailing.strip(),
+        "schema_version": 1, "symbol": symbol.strip(), "primary_timeframe": primary.strip(),
+        "context_timeframe": context.strip(), "trailing_timeframe": trailing.strip(),
         "short_ma_period": int(short_ma) if ma_enabled else None,
         "long_ma_period": int(long_ma) if ma_enabled else None,
-        "quantity": int(quantity),
-        "tick_size": float(tick_size),
-        "tick_value": float(tick_value),
-        "stop_buffer_ticks": int(stop_buffer),
-        "min_rr": float(min_rr),
-        "max_trades": int(max_trades),
-        "max_consecutive_losses": int(max_losses),
-        "max_session_loss": float(max_loss),
-        "pivot_window": int(pivot_window),
+        "quantity": float(quantity), "tick_size": float(tick_size), "tick_value": float(tick_value),
+        "stop_buffer_ticks": int(stop_buffer), "min_rr": float(min_rr),
+        "max_trades": int(max_trades), "max_consecutive_losses": int(max_losses),
+        "max_session_loss": float(max_loss), "pivot_window": int(pivot_window),
         "support_resistance_tolerance": float(tolerance),
     }
 
@@ -255,6 +169,34 @@ def render_settings(
     configuration: dict[str, Any], vector: dict[str, Any], telegram: dict[str, Any]
 ) -> None:
     st.header("Parâmetros e Configurações")
+    if st.button("Atualizar", type="primary", help="Lê a tela de ordens e o saldo da Vector sem alterar ordens."):
+        with st.spinner("Lendo a tela de ordens da Vector…"):
+            refreshed = action("POST", "/configuration/refresh", {})
+        configuration = api_request("GET", "/configuration")
+        if refreshed is not None:
+            st.success("Dados da Vector atualizados. Seus limites de risco foram preservados.")
+    snapshot = configuration.get("vector_snapshot")
+    if snapshot:
+        st.caption(f"{snapshot['source']} · leitura em {human_datetime(snapshot['observed_at'])}")
+        if not configuration.get('browser_connected'):
+            st.warning('A extensão foi desconectada. Os valores abaixo são da última leitura.')
+        balance = snapshot.get('balance')
+        b1, b2, b3 = st.columns(3)
+        b1.metric('Saldo disponível na Vector',
+                  (format(balance["amount"], ",.2f").replace(",", "_").replace(".", ",").replace("_", ".") + " " + balance["currency"]) if balance else 'Não identificado')
+        b2.metric('Preço da ordem', f"{snapshot['order']['price']['text']} {snapshot['order']['price']['unit']}")
+        b3.metric('Total da ordem', f"{snapshot['order']['total']['text']} {snapshot['order']['total']['unit']}")
+        st.caption('O saldo é uma referência de gerenciamento; não altera seu limite de perda.')
+        with st.expander('Gráficos encontrados e origem dos dados'):
+            st.dataframe([{'Ativo': c['symbol'], 'Período': c['timeframe'], 'Ativo na tela': c['active']}
+                          for c in snapshot['charts']], hide_index=True, width='stretch')
+            for note in snapshot['notes']:
+                st.caption(note)
+            st.caption('Ativo, período principal e quantidade vêm da tela atual. '
+                       'O tamanho do tick vem do incremento declarado no controle de preço. '
+                       'Contexto, trailing e médias dependem da configuração de leitura e não são presumidos.')
+    else:
+        st.info('Após conectar a Vector no Início, deixe a tela de ordens aberta e clique em Atualizar.')
     st.markdown(
         '<p class="section-intro">Defina o que o Providency deve observar e compare cada parâmetro com o estado realmente confirmado na Vector.</p>',
         unsafe_allow_html=True,
@@ -278,15 +220,10 @@ def render_settings(
     left, right = st.columns(2)
     with left:
         st.markdown("#### Vector Web")
-        if vector.get("state") == "OPEN":
-            st.success("Navegador controlado disponível.")
+        if configuration.get('browser_connected'):
+            st.success("Extensão conectada ao navegador atual.")
         else:
-            st.info("Abra a Vector e conclua o login manual para testar a configuração.")
-        if (
-            st.button("Abrir Vector Web", width="stretch")
-            and action("POST", "/vector/open") is not None
-        ):
-            st.info("Conclua o login na janela da Vector Web.")
+            st.info("Conecte a extensão no Início para atualizar os dados da Vector.")
     with right:
         st.markdown("#### Telegram")
         missing = telegram["configuration"].get("missing_fields", [])
@@ -593,7 +530,7 @@ with st.sidebar:
         '<div class="brand"><div class="brand-mark">P</div><div><div class="brand-name">Providency</div><div class="brand-sub">observe · confirme · proteja</div></div></div>',
         unsafe_allow_html=True,
     )
-    page = st.radio("Navegação", ("Início", "Conexões", "Configurações", "Atividades"), label_visibility="collapsed")
+    page = st.radio("Navegação", ("Início", "Configurações", "Atividades"), label_visibility="collapsed")
     st.divider()
     st.caption(f"Providency {__version__} · dados no dispositivo")
     st.caption("Fechar esta aba mantém o aplicativo em execução.")
@@ -606,7 +543,7 @@ with st.sidebar:
 if st.session_state.get("shutdown_requested"):
     st.success("Encerramento solicitado. O Providency está finalizando os processos; você pode fechar esta aba.")
     st.stop()
-if page in {"Início", "Conexões"}:
+if page == "Início":
     render_onboarding(action)
     st.stop()
 try:

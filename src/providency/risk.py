@@ -46,7 +46,7 @@ class TradeCandidate:
     context_capture_sha256: str
     entry: float | None
     stop: float | None
-    quantity: int
+    quantity: float
     risk_amount: float | None
     reference_target: float | None
     reference_rr: float
@@ -78,7 +78,7 @@ def build_candidate(
     context_capture_sha256: str,
     pattern_high: float | None,
     pattern_low: float | None,
-    quantity: int,
+    quantity: float,
     confluence: ConfluenceResult,
     policy: RiskPolicy,
     limits: SessionLimits,

@@ -911,7 +911,7 @@ class Storage:
         session_id: str,
         symbol: str,
         side: str,
-        quantity: int,
+        quantity: float,
         configuration_version: str,
         snapshot: Mapping[str, Any],
     ) -> dict[str, Any]:

@@ -60,7 +60,7 @@ class AnalysisConfiguration:
     trailing_timeframe: str = ""
     short_ma_period: int | None = None
     long_ma_period: int | None = None
-    quantity: int = 0
+    quantity: float = 0
     tick_size: float = 0.0
     tick_value: float = 0.0
     stop_buffer_ticks: int = 1
@@ -126,7 +126,7 @@ class AnalysisConfiguration:
             trailing_timeframe=os.getenv("PROVIDENCY_TRAILING_TIMEFRAME", "").strip(),
             short_ma_period=optional_int("PROVIDENCY_SHORT_MA_PERIOD"),
             long_ma_period=optional_int("PROVIDENCY_LONG_MA_PERIOD"),
-            quantity=int(os.getenv("PROVIDENCY_QUANTITY", "0")),
+            quantity=float(os.getenv("PROVIDENCY_QUANTITY", "0")),
             tick_size=float(os.getenv("PROVIDENCY_TICK_SIZE", "0")),
             tick_value=float(os.getenv("PROVIDENCY_TICK_VALUE", "0")),
             stop_buffer_ticks=int(os.getenv("PROVIDENCY_STOP_BUFFER_TICKS", "1")),

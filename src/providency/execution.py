@@ -69,7 +69,7 @@ class DemoExecutionService:
             session_id=str(approval["session_id"]),
             symbol=str(candidate["symbol"]),
             side=side.value,
-            quantity=int(candidate["quantity"]),
+            quantity=float(candidate["quantity"]),
             configuration_version=str(candidate["configuration_version"]),
             snapshot={
                 "approval": dict(approval),
@@ -78,18 +78,22 @@ class DemoExecutionService:
             },
         )
         operation_id = str(operation["operation_id"])
+        if not float(candidate["quantity"]).is_integer():
+            return self.storage.update_operation(
+                operation_id,
+                status="BLOCKED",
+                reason=(
+                    "Fractional quantity is preserved; the demo executor supports whole units only."
+                ),
+            )
         if self.mode is not ExecutionMode.DEMO:
             return self.storage.update_operation(
                 operation_id,
                 status="BLOCKED",
                 reason="Demo execution is disabled; DRY_RUN remains active.",
             )
-        if (
-            self.storage.has_blocking_protection()
-            or (
-                self.storage.has_blocking_operation()
-                and self.storage.open_operations() != [operation]
-            )
+        if self.storage.has_blocking_protection() or (
+            self.storage.has_blocking_operation() and self.storage.open_operations() != [operation]
         ):
             return self.storage.update_operation(
                 operation_id,

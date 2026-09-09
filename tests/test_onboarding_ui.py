@@ -28,7 +28,7 @@ def test_start_button_prepares_connection_without_starting_engine(
         ui = AppTest.from_file(str(Path(__file__).parents[1] / 'src/providency/ui.py'),
                                default_timeout=15).run()
         assert not ui.exception
-        assert list(ui.radio[0].options) == ['Início', 'Conexões', 'Configurações', 'Atividades']
+        assert list(ui.radio[0].options) == ['Início', 'Configurações', 'Atividades']
         next(button for button in ui.button if button.label == 'Iniciar BOT').click().run()
         assert not ui.exception
         assert client.get('/onboarding').json()['stage'] == 'VECTOR_WAIT'

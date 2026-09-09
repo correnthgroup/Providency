@@ -92,7 +92,7 @@ class AmbiguousSubmitAdapter(FakeDemoAdapter):
         raise TimeoutError("Vector did not expose a postcondition in time.")
 
 
-def approved(storage: Storage, *, side: str = "SHORT") -> dict[str, Any]:
+def approved(storage: Storage, *, side: str = "SHORT", quantity: float = 2) -> dict[str, Any]:
     session = storage.start_session()
     candidate = {
         "candidate_id": "candidate-1",
@@ -100,7 +100,7 @@ def approved(storage: Storage, *, side: str = "SHORT") -> dict[str, Any]:
         "decision": "ALLOWED",
         "symbol": "BTC/BRL",
         "side": side,
-        "quantity": 2,
+        "quantity": quantity,
         "configuration_version": "cfg-1",
     }
     storage.record_trade_candidate(
@@ -163,6 +163,17 @@ def test_unknown_account_blocks_before_quantity_or_submit(tmp_path: Path) -> Non
     assert adapter.prepare_calls == 0
     assert adapter.select_calls == 0
     assert adapter.submit_calls == 0
+
+
+def test_fractional_quantity_is_never_truncated_by_demo_execution(tmp_path: Path) -> None:
+    storage = Storage(tmp_path / 'providency.db')
+    storage.initialize()
+    adapter = FakeDemoAdapter([snapshot()])
+    service = DemoExecutionService(storage, adapter, mode=ExecutionMode.DEMO)
+    operation = asyncio.run(service.execute_approved(approved(storage, quantity=.25)))
+    assert operation['quantity'] == .25
+    assert operation['status'] == 'BLOCKED'
+    assert adapter.prepare_calls == adapter.select_calls == adapter.submit_calls == 0
 
 
 def test_dry_run_never_reaches_demo_adapter(tmp_path: Path) -> None:

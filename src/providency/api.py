@@ -10,6 +10,7 @@ from typing import Any, Literal
 
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse
+from playwright.async_api import Error as PlaywrightError
 from pydantic import BaseModel, Field
 
 from providency.approvals import ApprovalError, ApprovalService, render_proposal
@@ -42,6 +43,7 @@ from providency.vector import (
     VectorAdapterContract,
     VectorAdapterError,
 )
+from providency.vector_settings import merge_vector_fields
 
 
 class SessionPayload(BaseModel):
@@ -110,7 +112,7 @@ class ConfigurationPayload(BaseModel):
     trailing_timeframe: str = ""
     short_ma_period: int | None = Field(default=None, ge=1)
     long_ma_period: int | None = Field(default=None, ge=1)
-    quantity: int = Field(default=0, ge=0)
+    quantity: float = Field(default=0, ge=0, allow_inf_nan=False)
     tick_size: float = Field(default=0, ge=0)
     tick_value: float = Field(default=0, ge=0)
     stop_buffer_ticks: int = Field(default=1, ge=0)
@@ -159,6 +161,7 @@ def create_app(
 ) -> FastAPI:
     resolved = settings or Settings.from_env()
     onboarding = Onboarding(resolved)
+    vector_snapshot: dict[str, Any] | None = None
     service = EngineService(Storage(resolved.database_path), recover=recover)
     adapter = vector_adapter or VectorAdapter(resolved)
     matcher = PatternMatcher(
@@ -213,7 +216,7 @@ def create_app(
             await adapter.stop()
             await onboarding.close()
 
-    app = FastAPI(title="Providency Core Engine", version="0.9.0", lifespan=lifespan)
+    app = FastAPI(title="Providency Core Engine", version="0.10.0", lifespan=lifespan)
     onboarding.install(app)
 
     @app.middleware("http")
@@ -357,7 +360,50 @@ def create_app(
             "desired": configuration.to_dict(),
             "applied": service.storage.latest_applied_state(),
             "execution_mode": resolved.execution_mode.value,
+            "vector_snapshot": vector_snapshot,
+            "browser_connected": onboarding.bridge.connected,
         }
+
+    @app.post("/configuration/refresh")
+    async def refresh_configuration(request: Request) -> dict[str, Any]:
+        nonlocal configuration, vector_snapshot
+        if (
+            request.headers.get("origin")
+            not in {
+                None,
+                f"http://127.0.0.1:{resolved.ui_port}",
+                f"http://localhost:{resolved.ui_port}",
+            }
+            or request.headers.get("content-type", "").split(";")[0] != "application/json"
+        ):
+            raise HTTPException(403, "Origem ou formato da solicitação não autorizado.")
+        if service.storage.running_session() is not None:
+            raise HTTPException(409, "Pare a operação antes de atualizar os parâmetros.")
+        async with onboarding.lock:
+            previous_version = configuration.version
+            vector_snapshot = None
+            try:
+                async with asyncio.timeout(8):
+                    snapshot = await VectorAdapter.read_browser_settings(
+                        await onboarding.pages("web.vectorcrypto.com")
+                    )
+            except ValueError as exc:
+                raise HTTPException(409, str(exc)) from exc
+            except (PlaywrightError, TimeoutError) as exc:
+                raise HTTPException(
+                    409, "A leitura da Vector falhou. Confira a extensão e tente novamente."
+                ) from exc
+            if (
+                configuration.version != previous_version
+                or service.storage.running_session() is not None
+            ):
+                raise HTTPException(
+                    409, "A sessão ou configuração mudou durante a leitura. Tente novamente."
+                )
+            configuration = merge_vector_fields(configuration, snapshot["fields"])
+            service.storage.record_configuration(configuration.version, configuration.to_dict())
+            vector_snapshot = snapshot
+            return configured_state()
 
     @app.put("/configuration")
     def update_configuration(payload: ConfigurationPayload) -> dict[str, Any]:
