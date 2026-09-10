@@ -1,3 +1,4 @@
+# ruff: noqa: E501
 from __future__ import annotations
 
 import asyncio
@@ -22,7 +23,12 @@ from providency.context import PriceAnchor
 async def discover_browser_charts(pages: list[Any]) -> list[dict[str, Any]]:
     """Read internal Vector tabs without activating or changing any chart."""
     charts: list[dict[str, Any]] = []
-    for page_index, page in enumerate(pages):
+    page_ids: set[str] = set()
+    for page in pages:
+        page_id = _page_identity(page)
+        if page_id in page_ids:
+            raise ValueError("Há páginas Vector ambíguas sem identidade estável.")
+        page_ids.add(page_id)
         rows = await page.locator('[data-testid="asset-tab"]').evaluate_all("""tabs =>
             tabs.map(tab => ({
                 symbol: tab.querySelector('.title-ticker')?.textContent?.trim(),
@@ -30,11 +36,26 @@ async def discover_browser_charts(pages: list[Any]) -> list[dict[str, Any]]:
                 key: tab.getAttribute('str-asset-key-entity'),
                 active: tab.classList.contains('asset-tabs-component__tab--active')
             }))""")
-        for index, row in enumerate(rows):
+        for row in rows:
             if not row.get("symbol") or not row.get("timeframe") or not row.get("key"):
                 raise ValueError("Não foi possível identificar todos os gráficos da Vector.")
-            charts.append({**row, "id": f"{page_index}:{index}:{row['key']}"})
+            charts.append({**row, "page_id": page_id, "id": f"{page_id}::{row['key']}"})
     return charts
+
+
+def _page_identity(page: Any) -> str:
+    for name in ("target_id", "page_id", "guid"):
+        value = getattr(page, name, None)
+        if value:
+            return str(value)
+    implementation = getattr(page, "_impl_obj", None)
+    value = getattr(implementation, "_guid", None)
+    if value:
+        return str(value)
+    url = str(getattr(page, "url", "")).strip()
+    if url:
+        return url
+    raise ValueError("A página Vector não expôs uma identidade estável.")
 
 
 class CaptureDisposition(StrEnum):
@@ -515,6 +536,7 @@ class ChartCapture:
     region: CaptureRegion | None = None
     path: Path | None = None
     sha256: str | None = None
+    chart_id: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
@@ -537,6 +559,7 @@ class ChartCapture:
             region=CaptureRegion(**region) if isinstance(region, Mapping) else None,
             path=Path(str(path)) if path else None,
             sha256=str(payload["sha256"]) if payload.get("sha256") else None,
+            chart_id=str(payload["chart_id"]) if payload.get("chart_id") else None,
         )
 
 
@@ -561,6 +584,8 @@ class VectorAdapterContract(Protocol):
     async def open_vector(self) -> dict[str, str]: ...
 
     async def capture_primary_chart(self) -> ChartCapture: ...
+
+    async def capture_chart(self, chart_id: str) -> ChartCapture: ...
 
     async def sync_analysis_state(self, desired: DesiredVectorState) -> StateSyncResult: ...
 
@@ -989,10 +1014,9 @@ class VectorAdapter:
 
         charts = await discover_browser_charts(pages)
         sources: list[tuple[Any, Any, dict[str, Any]]] = []
-        for page_index, page in enumerate(pages):
-            active_charts = [
-                c for c in charts if c["active"] and c["id"].startswith(f"{page_index}:")
-            ]
+        for page in pages:
+            page_id = _page_identity(page)
+            active_charts = [c for c in charts if c["active"] and c["page_id"] == page_id]
             for panel in await page.locator(".graphic-order-crypto").all():
                 if await panel.is_visible():
                     if len(active_charts) != 1:
@@ -1167,6 +1191,44 @@ class VectorAdapter:
                 raise
             except Exception as exc:
                 raise VectorAdapterError("PV-VECTOR-003", "Vector chart capture failed.") from exc
+
+    async def capture_chart(self, chart_id: str) -> ChartCapture:
+        """Activate one stable internal tab, verify PRE/POST, then capture it."""
+        async with self._lock:
+            if self._page is None:
+                raise VectorAdapterError("PV-VECTOR-002", "Open Vector Web before capturing.")
+            charts = await discover_browser_charts([self._page])
+            target = next((chart for chart in charts if chart["id"] == chart_id), None)
+            if target is None:
+                raise VectorAdapterError(
+                    "PV-VECTOR-023", "O gráfico confirmado não está disponível."
+                )
+            if not target["active"]:
+                tabs = await self._page.locator('[data-testid="asset-tab"]').all()
+                matches = []
+                for tab in tabs:
+                    if await tab.get_attribute("str-asset-key-entity") == target["key"]:
+                        matches.append(tab)
+                if len(matches) != 1:
+                    raise VectorAdapterError("PV-VECTOR-024", "A aba confirmada ficou ambígua.")
+                await matches[0].click()
+                after = await discover_browser_charts([self._page])
+                selected = next((chart for chart in after if chart["id"] == chart_id), None)
+                if selected is None or not selected["active"]:
+                    raise VectorAdapterError(
+                        "PV-VECTOR-025", "A seleção da aba não foi confirmada."
+                    )
+            capture = await self.capture_service.capture(PlaywrightPageProbe(self._page))
+            return ChartCapture(
+                **{
+                    **capture.to_dict(),
+                    "disposition": capture.disposition,
+                    "issue": capture.issue,
+                    "path": capture.path,
+                    "region": capture.region,
+                    "chart_id": chart_id,
+                }
+            )
 
     async def sync_analysis_state(self, desired: DesiredVectorState) -> StateSyncResult:
         async with self._lock:

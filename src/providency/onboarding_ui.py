@@ -59,7 +59,11 @@ def render_onboarding(action: Callable[..., Any]) -> None:
         st.write(
             "Conecte seu navegador, confira os gráficos abertos e escolha o destino no Telegram."
         )
-        if st.button("Iniciar BOT", type="primary"):
+        if st.button("Preparar conexões", type="primary"):
+            advance("start")
+        if st.button(
+            "Iniciar BOT", help="Compatibilidade: este botão apenas prepara as conexões."
+        ):
             advance("start")
     elif stage == "VECTOR_WAIT":
         st.subheader("Abra a Vector no seu navegador")

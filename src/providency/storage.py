@@ -1,3 +1,4 @@
+# ruff: noqa: E501
 from __future__ import annotations
 
 import json
@@ -38,6 +39,11 @@ class Storage:
                 CREATE TABLE IF NOT EXISTS schema_meta (
                     version INTEGER PRIMARY KEY,
                     applied_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS telegram_configuration (
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    configuration_json TEXT NOT NULL
                 );
 
                 CREATE TABLE IF NOT EXISTS sessions (
@@ -258,6 +264,56 @@ class Storage:
                     ON human_reviews(created_at DESC);
                 CREATE INDEX IF NOT EXISTS human_reviews_pattern
                     ON human_reviews(pattern_id, pattern_version, created_at DESC);
+
+                CREATE TABLE IF NOT EXISTS observation_configuration (
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    updated_at TEXT NOT NULL,
+                    configuration_json TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS observation_sessions (
+                    id TEXT PRIMARY KEY,
+                    started_at TEXT NOT NULL,
+                    ended_at TEXT,
+                    status TEXT NOT NULL CHECK (status IN ('RUNNING', 'STOPPED', 'ERROR', 'INTERRUPTED')),
+                    configuration_json TEXT NOT NULL,
+                    error TEXT
+                );
+                CREATE UNIQUE INDEX IF NOT EXISTS one_running_observation_session
+                    ON observation_sessions(status) WHERE status = 'RUNNING';
+
+                CREATE TABLE IF NOT EXISTS observation_cycles (
+                    id TEXT PRIMARY KEY,
+                    session_id TEXT NOT NULL,
+                    started_at TEXT NOT NULL,
+                    completed_at TEXT,
+                    status TEXT NOT NULL CHECK (status IN ('COMPLETE', 'PARTIAL', 'FAILED', 'CANCELLED')),
+                    summary TEXT NOT NULL,
+                    chart_count INTEGER NOT NULL CHECK (chart_count >= 0),
+                    FOREIGN KEY (session_id) REFERENCES observation_sessions(id)
+                );
+                CREATE INDEX IF NOT EXISTS observation_cycles_started_at
+                    ON observation_cycles(started_at DESC);
+
+                CREATE TABLE IF NOT EXISTS observation_results (
+                    id TEXT PRIMARY KEY,
+                    cycle_id TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    result_json TEXT NOT NULL,
+                    FOREIGN KEY (cycle_id) REFERENCES observation_cycles(id)
+                );
+
+                CREATE TABLE IF NOT EXISTS observation_outbox (
+                    id TEXT PRIMARY KEY,
+                    cycle_id TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    status TEXT NOT NULL CHECK (status IN ('PENDING', 'SENDING', 'SENT', 'FAILED', 'UNKNOWN_DELIVERY')),
+                    text TEXT NOT NULL,
+                    response_json TEXT,
+                    error TEXT,
+                    UNIQUE(cycle_id)
+                );
                 """
             )
             connection.execute(
@@ -286,6 +342,10 @@ class Storage:
             )
             connection.execute(
                 "INSERT OR IGNORE INTO schema_meta(version, applied_at) VALUES (7, ?)",
+                (utc_now(),),
+            )
+            connection.execute(
+                "INSERT OR IGNORE INTO schema_meta(version, applied_at) VALUES (8, ?)",
                 (utc_now(),),
             )
             connection.execute(
@@ -530,6 +590,207 @@ class Storage:
         result = dict(row)
         result["desired"] = json.loads(result.pop("desired_json"))
         return result
+
+    def telegram_configuration(self) -> dict[str, Any] | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT configuration_json FROM telegram_configuration WHERE id = 1"
+            ).fetchone()
+        return dict(json.loads(row[0])) if row else None
+
+    def save_telegram_configuration(self, configuration: Mapping[str, Any]) -> None:
+        with self.connect() as connection:
+            connection.execute(
+                "INSERT INTO telegram_configuration VALUES (1, ?) "
+                "ON CONFLICT(id) DO UPDATE SET configuration_json = excluded.configuration_json",
+                (json.dumps(dict(configuration)),),
+            )
+            connection.commit()
+
+    def observation_configuration(self) -> dict[str, Any] | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT configuration_json FROM observation_configuration WHERE id = 1"
+            ).fetchone()
+        return json.loads(str(row[0])) if row is not None else None
+
+    def save_observation_configuration(self, configuration: Mapping[str, Any]) -> None:
+        payload = json.dumps(dict(configuration), separators=(",", ":"), sort_keys=True)
+        with self.connect() as connection:
+            connection.execute(
+                "INSERT INTO observation_configuration(id, updated_at, configuration_json) VALUES (1, ?, ?) "
+                "ON CONFLICT(id) DO UPDATE SET updated_at = excluded.updated_at, configuration_json = excluded.configuration_json",
+                (utc_now(), payload),
+            )
+            connection.commit()
+
+    def start_observation_session(self, configuration: Mapping[str, Any]) -> str:
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT id FROM observation_sessions WHERE status = 'RUNNING' LIMIT 1"
+            ).fetchone()
+            if row is not None:
+                connection.commit()
+                return str(row["id"])
+            session_id = str(uuid4())
+            connection.execute(
+                "INSERT INTO observation_sessions(id, started_at, status, configuration_json) VALUES (?, ?, 'RUNNING', ?)",
+                (
+                    session_id,
+                    utc_now(),
+                    json.dumps(dict(configuration), separators=(",", ":"), sort_keys=True),
+                ),
+            )
+            connection.commit()
+            return session_id
+
+    def recover_interrupted_observation_session(self) -> str | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT id FROM observation_sessions WHERE status = 'RUNNING' LIMIT 1"
+            ).fetchone()
+            if row is None:
+                return None
+            session_id = str(row["id"])
+            connection.execute(
+                "UPDATE observation_sessions SET status = 'INTERRUPTED', ended_at = ?, "
+                "error = 'Processo reiniciado antes do término da sessão.' WHERE id = ?",
+                (utc_now(), session_id),
+            )
+            connection.commit()
+            return session_id
+
+    def stop_observation_session(self, session_id: str, error: str | None = None) -> None:
+        with self.connect() as connection:
+            connection.execute(
+                "UPDATE observation_sessions SET status = ?, ended_at = ?, error = ? WHERE id = ? AND status = 'RUNNING'",
+                ("ERROR" if error else "STOPPED", utc_now(), error, session_id),
+            )
+            connection.commit()
+
+    def record_observation_event(self, session_id: str, level: str, message: str) -> None:
+        self.record_event(
+            session_id=session_id,
+            level=level,
+            component="observation",
+            event_type=f"OBSERVATION_{level}",
+            message=message,
+        )
+
+    def record_observation_cycle(
+        self,
+        cycle_id: str,
+        session_id: str | None,
+        started_at: Any,
+        status: str,
+        summary: str,
+        chart_count: int,
+    ) -> None:
+        if session_id is None:
+            raise ValueError("Observation cycle requires a session.")
+        started = started_at.isoformat() if hasattr(started_at, "isoformat") else str(started_at)
+        with self.connect() as connection:
+            existing = connection.execute(
+                "SELECT id FROM observation_cycles WHERE id = ?", (cycle_id,)
+            ).fetchone()
+            if existing is None:
+                connection.execute(
+                    "INSERT INTO observation_cycles(id, session_id, started_at, completed_at, status, summary, chart_count) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (cycle_id, session_id, started, utc_now(), status, summary, chart_count),
+                )
+            else:
+                connection.execute(
+                    "UPDATE observation_cycles SET completed_at = ?, status = ?, summary = ?, chart_count = ? WHERE id = ?",
+                    (utc_now(), status, summary, chart_count, cycle_id),
+                )
+            connection.commit()
+
+    def record_observation_result(self, cycle_id: str, result: Mapping[str, Any]) -> str:
+        result_id = str(uuid4())
+        with self.connect() as connection:
+            connection.execute(
+                "INSERT INTO observation_results(id, cycle_id, created_at, result_json) VALUES (?, ?, ?, ?)",
+                (
+                    result_id,
+                    cycle_id,
+                    utc_now(),
+                    json.dumps(dict(result), separators=(",", ":"), sort_keys=True),
+                ),
+            )
+            connection.commit()
+        return result_id
+
+    def list_observation_cycles(
+        self, *, session_id: str | None = None, limit: int = 100, offset: int = 0
+    ) -> list[dict[str, Any]]:
+        safe_limit = min(max(limit, 1), 500)
+        safe_offset = max(offset, 0)
+        with self.connect() as connection:
+            if session_id is None:
+                rows = connection.execute(
+                    "SELECT id, session_id, started_at, completed_at, status, summary, chart_count "
+                    "FROM observation_cycles ORDER BY started_at DESC LIMIT ? OFFSET ?",
+                    (safe_limit, safe_offset),
+                ).fetchall()
+            else:
+                rows = connection.execute(
+                    "SELECT id, session_id, started_at, completed_at, status, summary, chart_count "
+                    "FROM observation_cycles WHERE session_id = ? ORDER BY started_at DESC LIMIT ? OFFSET ?",
+                    (session_id, safe_limit, safe_offset),
+                ).fetchall()
+            result: list[dict[str, Any]] = []
+            for row in rows:
+                item = dict(row)
+                children = connection.execute(
+                    "SELECT result_json FROM observation_results WHERE cycle_id = ? ORDER BY created_at",
+                    (item["id"],),
+                ).fetchall()
+                item["results"] = [json.loads(str(child[0])) for child in children]
+                result.append(item)
+            return result
+
+    def create_observation_outbox(self, cycle_id: str, text: str) -> str:
+        outbox_id = str(uuid4())
+        with self.connect() as connection:
+            connection.execute(
+                "INSERT INTO observation_outbox(id, cycle_id, created_at, updated_at, status, text) "
+                "VALUES (?, ?, ?, ?, 'PENDING', ?)",
+                (outbox_id, cycle_id, utc_now(), utc_now(), text),
+            )
+            connection.commit()
+        return outbox_id
+
+    def finish_observation_outbox(
+        self,
+        outbox_id: str,
+        status: str,
+        *,
+        response: Mapping[str, Any] | None = None,
+        error: str | None = None,
+    ) -> None:
+        with self.connect() as connection:
+            connection.execute(
+                "UPDATE observation_outbox SET updated_at = ?, status = ?, response_json = ?, error = ? WHERE id = ?",
+                (
+                    utc_now(),
+                    status,
+                    json.dumps(dict(response)) if response is not None else None,
+                    error,
+                    outbox_id,
+                ),
+            )
+            connection.commit()
+
+    def mark_observation_outbox_sending(self, outbox_id: str) -> None:
+        with self.connect() as connection:
+            connection.execute(
+                "UPDATE observation_outbox SET updated_at = ?, status = 'SENDING' "
+                "WHERE id = ? AND status = 'PENDING'",
+                (utc_now(), outbox_id),
+            )
+            connection.commit()
 
     def record_applied_state(
         self,
@@ -1304,9 +1565,7 @@ class Storage:
         pattern_version: str,
     ) -> dict[str, Any]:
         review_key = (
-            f"detection:{detection_id}"
-            if detection_id is not None
-            else f"candidate:{candidate_id}"
+            f"detection:{detection_id}" if detection_id is not None else f"candidate:{candidate_id}"
         )
         review_id = str(uuid4())
         with self.connect() as connection:

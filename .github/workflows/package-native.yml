@@ -1,0 +1,26 @@
+name: Native package
+
+on:
+  workflow_dispatch:
+
+jobs:
+  package-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.0.1
+        with:
+          python-version: "3.12"
+          enable-cache: true
+      - run: uv sync --locked --dev
+      - run: uv run python packaging/build_release.py --plan
+      - run: uv run python packaging/build_release.py
+      - name: Validate native bundle without running the application
+        shell: bash
+        run: |
+          test -d "release/Providency/Providency MAC.app"
+          test -f "release/Providency/Providency MAC.app/Contents/Info.plist"
+          test -x "release/Providency/Providency MAC.app/Contents/MacOS/Providency MAC"
+          file "release/Providency/Providency MAC.app/Contents/MacOS/Providency MAC" | grep -q Mach-O
+          ditto -c -k --sequesterRsrc --keepParent release/Providency Providency-macOS.zip
+          shasum -a 256 Providency-macOS.zip

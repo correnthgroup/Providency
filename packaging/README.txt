@@ -23,11 +23,17 @@ de encerrar. Este botão não envia ordens e não é uma parada de emergência.
 
 PRIMEIRO USO
 ------------
-1. Abra Parâmetros e Configurações.
-2. Preencha o ativo, os timeframes e os limites de gerenciamento.
-3. Abra a Vector Web e conclua o login manual.
-4. Configure o Telegram no cofre/ambiente local.
-5. Compare Desejado × Aplicado antes de iniciar uma sessão.
+1. Abra Início e use "Preparar conexões".
+2. Abra a Vector Web e conclua o login manual no navegador conectado.
+3. Confirme todos os gráficos encontrados e o destino Telegram.
+4. Em Configurações, defina o intervalo e confira o catálogo.
+5. Em Atividades, use "Iniciar Bot" para a primeira captura imediata.
+
+OBSERVAÇÃO INFORMATIVA
+----------------------
+O modo OBSERVATION_ONLY lê somente screenshots novas e envia um resumo de
+padrões ao chat confirmado. Ele não cria propostas, aprovações, WOULD_EXECUTE,
+ordens, sincronizações financeiras, stops ou fechamentos.
 
 SEGURANÇA
 ---------

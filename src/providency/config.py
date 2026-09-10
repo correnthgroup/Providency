@@ -16,6 +16,10 @@ class ExecutionMode(StrEnum):
     DEMO = "DEMO"
 
 
+class RuntimeMode(StrEnum):
+    OBSERVATION_ONLY = "OBSERVATION_ONLY"
+
+
 @dataclass(frozen=True, slots=True)
 class TelegramConfiguration:
     chat_id: int = 0
@@ -151,7 +155,7 @@ class Settings:
     patterns_dir: Path | None = None
     analysis_configuration: AnalysisConfiguration | None = None
     telegram_configuration: TelegramConfiguration | None = None
-    execution_mode: ExecutionMode = ExecutionMode.DRY_RUN
+    execution_mode: ExecutionMode | RuntimeMode = ExecutionMode.DRY_RUN
     evidence_retention_days: int = 30
 
     def __post_init__(self) -> None:
@@ -214,8 +218,15 @@ class Settings:
                 if (configured_patterns := os.getenv("PROVIDENCY_PATTERNS_DIR", "").strip())
                 else None
             ),
-            execution_mode=ExecutionMode(
-                os.getenv("PROVIDENCY_EXECUTION_MODE", ExecutionMode.DRY_RUN.value).strip().upper()
+            execution_mode=(
+                RuntimeMode.OBSERVATION_ONLY
+                if os.getenv("PROVIDENCY_EXECUTION_MODE", "DRY_RUN").strip().upper()
+                == RuntimeMode.OBSERVATION_ONLY.value
+                else ExecutionMode(
+                    os.getenv("PROVIDENCY_EXECUTION_MODE", ExecutionMode.DRY_RUN.value)
+                    .strip()
+                    .upper()
+                )
             ),
             evidence_retention_days=int(os.getenv("PROVIDENCY_EVIDENCE_RETENTION_DAYS", "30")),
         )

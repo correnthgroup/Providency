@@ -1,3 +1,4 @@
+# ruff: noqa: E501
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
@@ -141,6 +142,12 @@ class PatternPackage:
     sequence_rules: tuple[Rule, ...]
     family: str
     compatible_context_families: tuple[str, ...]
+    display_name_pt: str = ""
+    name_en: str = ""
+    research_confidence: str = "UNKNOWN"
+    confirmation_mode: str = "BAR_CLOSE"
+    observed_precision: float | None = None
+    description: str = ""
 
     @classmethod
     def load(cls, path: Path) -> PatternPackage:
@@ -151,9 +158,13 @@ class PatternPackage:
         root = _mapping(raw, "pattern.yaml")
         pattern_id = root.get("id")
         version = root.get("version")
-        if pattern_id != "bearish_engulfing" or not isinstance(version, str):
+        if pattern_id == "unknown":
             raise PatternPackageError(
-                "Only bearish_engulfing with an explicit version is supported."
+                "Only bearish_engulfing and catalog pattern packages are supported."
+            )
+        if not isinstance(pattern_id, str) or not pattern_id or not isinstance(version, str):
+            raise PatternPackageError(
+                "Only bearish_engulfing and catalog pattern packages with an explicit version are supported."
             )
         recognition = _mapping(root.get("recognition"), "recognition")
         context = _mapping(recognition.get("context", {}), "recognition.context")
@@ -165,8 +176,20 @@ class PatternPackage:
             preceding_candles = int(context.get("preceding_candles", 0))
         except (KeyError, TypeError, ValueError) as exc:
             raise PatternPackageError("Pattern candle counts must be integers.") from exc
-        if sequence_candles != 2 or preceding_candles < 0:
-            raise PatternPackageError("bearish_engulfing must use two sequence candles.")
+        if sequence_candles < 1 or preceding_candles < 0:
+            raise PatternPackageError("Pattern packages must use at least one sequence candle.")
+        confirmation = _mapping(root.get("confirmation", {}), "confirmation")
+        mode = confirmation.get("mode")
+        if mode not in {"BAR_CLOSE", "NEXT_BAR_BREAKOUT", "INTRABAR_ALLOWED"}:
+            raise PatternPackageError("Pattern confirmation mode is unsupported.")
+        family = root.get("family")
+        if not isinstance(family, str) or not family:
+            raise PatternPackageError("Pattern family is required.")
+        observed = root.get("observed_precision")
+        if observed is not None and (
+            not isinstance(observed, (int, float)) or not 0 <= observed <= 1
+        ):
+            raise PatternPackageError("observed_precision must be between zero and one.")
         return cls(
             id=pattern_id,
             version=version,
@@ -175,11 +198,33 @@ class PatternPackage:
             preceding_candles=preceding_candles,
             context_rules=context_rules,
             sequence_rules=sequence_rules,
-            family=str(root.get("family", "")),
+            family=family,
             compatible_context_families=tuple(
                 str(value) for value in root.get("compatible_context_families", [])
             ),
+            display_name_pt=str(root.get("display_name_pt", pattern_id)),
+            name_en=str(root.get("name_en", pattern_id)),
+            research_confidence=str(root.get("research_confidence", "UNKNOWN")),
+            confirmation_mode=str(mode),
+            observed_precision=float(observed) if observed is not None else None,
+            description=str(
+                _mapping(root.get("formation", {}), "formation").get("description", "")
+            ),
         )
+
+    def to_catalog_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "version": self.version,
+            "display_name_pt": self.display_name_pt,
+            "name_en": self.name_en,
+            "family": self.family,
+            "description": self.description,
+            "confirmation": {"mode": self.confirmation_mode},
+            "research_confidence": self.research_confidence,
+            "observed_precision": self.observed_precision,
+            "sequence_candles": self.sequence_candles,
+        }
 
 
 SUPPORTED_FIELDS = {

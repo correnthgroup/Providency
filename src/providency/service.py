@@ -1,11 +1,28 @@
+# ruff: noqa: E501
 from __future__ import annotations
 
+from dataclasses import dataclass
+from enum import StrEnum
 from typing import Any
 
 from providency.patterns import PatternEvidence, PatternMatcher, PatternMatchResult
 from providency.storage import Storage
 from providency.vector import CaptureDisposition, ChartCapture
 from providency.vision import CandleDetector, VisionDetectionError
+
+
+class AnalysisDisposition(StrEnum):
+    USABLE = "USABLE"
+    NO_DECISION = "NO_DECISION"
+    ANALYSIS_ERROR = "ANALYSIS_ERROR"
+
+
+@dataclass(frozen=True, slots=True)
+class AnalysisOutcome:
+    disposition: AnalysisDisposition
+    result: PatternMatchResult | None
+    reason: str
+    detection_id: str | None
 
 
 class EngineService:
@@ -44,9 +61,40 @@ class PatternAnalysisService:
         result, _detection_id = self.analyze_with_id(capture)
         return result
 
-    def analyze_with_id(
-        self, capture: ChartCapture
-    ) -> tuple[PatternMatchResult, str | None]:
+    def analyze_with_outcome(self, capture: ChartCapture) -> AnalysisOutcome:
+        """Expose operational failure separately from a valid NO_MATCH."""
+        if capture.disposition is not CaptureDisposition.USABLE:
+            issue = capture.issue.value if capture.issue else "capture metadata is incomplete"
+            return AnalysisOutcome(AnalysisDisposition.NO_DECISION, None, issue, None)
+        if capture.path is None or capture.sha256 is None:
+            return AnalysisOutcome(
+                AnalysisDisposition.NO_DECISION, None, "capture metadata is incomplete", None
+            )
+        try:
+            window = self.detector.detect(capture.path)
+        except VisionDetectionError as exc:
+            return AnalysisOutcome(AnalysisDisposition.ANALYSIS_ERROR, None, str(exc), None)
+        sequence_size = self.matcher.package.sequence_candles
+        context_size = self.matcher.package.preceding_candles
+        selected = window.candles[-(sequence_size + context_size) :]
+        context = selected[:context_size]
+        sequence = selected[context_size:]
+        evidence = PatternEvidence(
+            screenshot_sha256=capture.sha256,
+            screenshot_path=str(capture.path),
+            image_width=window.image_width,
+            image_height=window.image_height,
+            candles=window.candles,
+        )
+        result = self.matcher.evaluate(
+            [item.candle for item in sequence],
+            [item.candle.close for item in context],
+            evidence=evidence,
+        )
+        detection_id = self._persist(capture, result)
+        return AnalysisOutcome(AnalysisDisposition.USABLE, result, result.reason, detection_id)
+
+    def analyze_with_id(self, capture: ChartCapture) -> tuple[PatternMatchResult, str | None]:
         if (
             capture.disposition is not CaptureDisposition.USABLE
             or capture.path is None

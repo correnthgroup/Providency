@@ -1,3 +1,4 @@
+# ruff: noqa: E501
 from __future__ import annotations
 
 import asyncio
@@ -11,10 +12,17 @@ from typing import Any, Literal
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse
 from playwright.async_api import Error as PlaywrightError
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from providency.approvals import ApprovalError, ApprovalService, render_proposal
-from providency.config import AnalysisConfiguration, ExecutionMode, Settings
+from providency.catalog import PatternCatalog, PatternCatalogError
+from providency.config import (
+    AnalysisConfiguration,
+    ExecutionMode,
+    RuntimeMode,
+    Settings,
+    TelegramConfiguration,
+)
 from providency.context import (
     ConfluenceItem,
     ConfluenceResult,
@@ -27,6 +35,7 @@ from providency.context import (
 from providency.evidence import EvidenceSanitizer, RedactionRegion
 from providency.execution import DemoExecutionService
 from providency.metrics import pattern_metrics
+from providency.observation import ObservationCoordinator, ObservationPhase
 from providency.onboarding import Onboarding
 from providency.patterns import Candle, PatternMatcher, PatternPackage
 from providency.protection import PositionProtectionService
@@ -94,6 +103,13 @@ class EvidenceSanitizePayload(BaseModel):
     redactions: list[RedactionPayload] = Field(default_factory=list)
 
 
+class ObservationConfigurationPayload(BaseModel):
+    model_config = {"extra": "forbid"}
+    interval: dict[str, Any] = Field(default_factory=dict)
+    charts: list[dict[str, Any]] = Field(default_factory=list)
+    enabled_pattern_ids: list[str] = Field(default_factory=list)
+
+
 class ReviewPayload(BaseModel):
     detection_id: str | None = None
     candidate_id: str | None = None
@@ -102,6 +118,21 @@ class ReviewPayload(BaseModel):
     reviewer_id: str = "local:operator"
     evidence_sha256: str
     evidence_path: str
+
+
+class TelegramConfigurationPayload(BaseModel):
+    model_config = {"extra": "forbid"}
+    chat_id: int = Field(strict=True)
+    user_id: int = Field(strict=True, gt=0)
+    approval_ttl_seconds: int = Field(default=60, strict=True, gt=0)
+    recheck_price_tolerance_ticks: int = Field(default=1, strict=True, ge=0)
+
+    @field_validator("chat_id")
+    @classmethod
+    def nonzero_chat(cls, value: int) -> int:
+        if value == 0:
+            raise ValueError("Informe o chat de destino.")
+        return value
 
 
 class ConfigurationPayload(BaseModel):
@@ -164,6 +195,7 @@ def create_app(
     vector_snapshot: dict[str, Any] | None = None
     service = EngineService(Storage(resolved.database_path), recover=recover)
     adapter = vector_adapter or VectorAdapter(resolved)
+    catalog = PatternCatalog(resolved.pattern_catalog_dir)
     matcher = PatternMatcher(
         PatternPackage.load(resolved.pattern_catalog_dir / "bearish_engulfing" / "pattern.yaml")
     )
@@ -174,8 +206,24 @@ def create_app(
         if stored_configuration is not None
         else resolved.trading_configuration
     )
-    telegram_configuration = resolved.telegram
+    stored_telegram = service.storage.telegram_configuration()
+    telegram_configuration = resolved.telegram_configuration or (
+        TelegramConfiguration(**stored_telegram) if stored_telegram else resolved.telegram
+    )
     telegram = telegram_client or TelegramClient()
+    financial_mode = (
+        resolved.execution_mode
+        if isinstance(resolved.execution_mode, ExecutionMode)
+        else ExecutionMode.DRY_RUN
+    )
+    observation = ObservationCoordinator(
+        service.storage,
+        adapter,
+        catalog,
+        telegram,
+        execution_mode=resolved.execution_mode,
+        telegram_chat_id=telegram_configuration.chat_id,
+    )
     approvals = ApprovalService(
         service.storage,
         chat_id=telegram_configuration.chat_id,
@@ -183,11 +231,11 @@ def create_app(
         ttl_seconds=telegram_configuration.approval_ttl_seconds,
         dry_run=resolved.execution_mode is ExecutionMode.DRY_RUN,
     )
-    protection = PositionProtectionService(service.storage, adapter, mode=resolved.execution_mode)
+    protection = PositionProtectionService(service.storage, adapter, mode=financial_mode)
     execution = DemoExecutionService(
         service.storage,
         adapter,
-        mode=resolved.execution_mode,
+        mode=financial_mode,
         protection=protection,
     )
     reviews = ReviewService(service.storage)
@@ -203,7 +251,7 @@ def create_app(
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         task: asyncio.Task[None] | None = None
-        if telegram_polling and not telegram_configuration.missing_fields:
+        if telegram_polling:
             task = asyncio.create_task(poll_worker())
         try:
             yield
@@ -213,10 +261,11 @@ def create_app(
                 task.cancel()
                 with suppress(asyncio.CancelledError):
                     await task
+            await observation.close()
             await adapter.stop()
             await onboarding.close()
 
-    app = FastAPI(title="Providency Core Engine", version="0.10.0", lifespan=lifespan)
+    app = FastAPI(title="Providency Core Engine", version="0.11.0", lifespan=lifespan)
     onboarding.install(app)
 
     @app.middleware("http")
@@ -232,6 +281,34 @@ def create_app(
                 status_code=409,
                 content={"detail": {"human_message": "O Providency está encerrando."}},
             )
+        if resolved.execution_mode is RuntimeMode.OBSERVATION_ONLY:
+            financial_prefixes = (
+                "/run",
+                "/stop",
+                "/candidate",
+                "/approvals",
+                "/operations",
+                "/execution",
+            )
+            financial_mutation = request.method not in {"GET", "HEAD", "OPTIONS"} and (
+                request.url.path in {"/configuration", "/vector/sync"}
+                or request.url.path.startswith(financial_prefixes)
+            )
+            if financial_mutation:
+                return JSONResponse(
+                    status_code=409,
+                    content={
+                        "detail": {
+                            "error_code": "PV-OBSERVATION-001",
+                            "short_title": "Modo somente leitura",
+                            "human_message": "Esta instalação está em OBSERVATION_ONLY; ações financeiras estão bloqueadas.",
+                            "impact": "Nenhuma ordem, sincronização financeira ou WOULD_EXECUTE será produzida.",
+                            "suggested_actions": [
+                                "Use as rotas /observation para observar os gráficos."
+                            ],
+                        }
+                    },
+                )
         active_commands += 1
         try:
             return await call_next(request)
@@ -334,6 +411,74 @@ def create_app(
     @app.get("/events", response_model=list[EventPayload])
     def events(limit: int = Query(default=100, ge=1, le=500)) -> list[dict[str, Any]]:
         return service.storage.list_events(limit)
+
+    @app.get("/observation/configuration")
+    def observation_configuration() -> dict[str, Any]:
+        state = observation.state()
+        configuration = dict(state["configuration"])
+        configuration.update({
+            "state": observation.phase.value,
+            "editable": observation.phase in {ObservationPhase.STOPPED, ObservationPhase.ERROR},
+        })
+        return configuration
+
+    @app.put("/observation/configuration")
+    def configure_observation(
+        payload: ObservationConfigurationPayload, request: Request
+    ) -> dict[str, Any]:
+        origin = request.headers.get("origin")
+        if origin is not None and origin not in {
+            f"http://127.0.0.1:{resolved.ui_port}",
+            f"http://localhost:{resolved.ui_port}",
+        }:
+            raise HTTPException(403, "Use o painel local do Providency.")
+        try:
+            return observation.configure(payload.model_dump())
+        except (ValueError, PatternCatalogError) as exc:
+            status = 409 if "Pare" in str(exc) else 422
+            raise HTTPException(
+                status, detail={"error_code": "PV-OBSERVATION-002", "human_message": str(exc)}
+            ) from exc
+
+    @app.get("/observation/state")
+    def observation_state() -> dict[str, Any]:
+        return observation.state()
+
+    @app.post("/observation/start")
+    async def observation_start() -> dict[str, Any]:
+        if not observation.configuration.charts:
+            onboarding_charts = onboarding.state().get("charts", [])
+            if onboarding_charts:
+                try:
+                    observation.configure(
+                        {**observation.configuration.to_dict(), "charts": onboarding_charts}
+                    )
+                except (ValueError, PatternCatalogError) as exc:
+                    raise HTTPException(409, detail=str(exc)) from exc
+        try:
+            return await observation.start()
+        except (ValueError, RuntimeError, PatternCatalogError) as exc:
+            raise HTTPException(
+                409, detail={"error_code": "PV-OBSERVATION-003", "human_message": str(exc)}
+            ) from exc
+
+    @app.post("/observation/stop")
+    async def observation_stop() -> dict[str, Any]:
+        return await observation.stop()
+
+    @app.get("/observation/cycles")
+    def observation_cycles(
+        session_id: str | None = None,
+        limit: int = Query(default=100, ge=1, le=500),
+        offset: int = Query(default=0, ge=0),
+    ) -> list[dict[str, Any]]:
+        return service.storage.list_observation_cycles(
+            session_id=session_id, limit=limit, offset=offset
+        )
+
+    @app.get("/patterns/catalog")
+    def patterns_catalog() -> list[dict[str, Any]]:
+        return catalog.to_list()
 
     @app.get("/sessions/{session_id}/report")
     def session_report(session_id: str) -> dict[str, Any]:
@@ -968,7 +1113,7 @@ def create_app(
         nonlocal telegram_poll_error
         while not stop_polling.is_set():
             approvals.expire()
-            if service.storage.running_session() is None:
+            if telegram_configuration.missing_fields or service.storage.running_session() is None:
                 await asyncio.sleep(1)
                 continue
             try:
@@ -1003,16 +1148,48 @@ def create_app(
             "configuration": telegram_configuration.to_dict(),
             "polling": telegram_polling and not telegram_configuration.missing_fields,
             "poll_error": telegram_poll_error,
+            "browser_destination": onboarding.state()["destination"],
+            "session_active": service.storage.running_session() is not None,
         }
+
+    @app.put("/telegram/configuration")
+    async def configure_telegram(
+        payload: TelegramConfigurationPayload,
+        request: Request,
+    ) -> dict[str, Any]:
+        nonlocal telegram_configuration, telegram_poll_error
+        if request.headers.get("origin") not in {
+            None,
+            f"http://127.0.0.1:{resolved.ui_port}",
+            f"http://localhost:{resolved.ui_port}",
+        }:
+            raise HTTPException(403, "Use o painel local do Providency.")
+        if service.storage.running_session() is not None or active_callbacks:
+            raise HTTPException(409, "Pare a sessão antes de alterar o Telegram.")
+        values = payload.model_dump()
+        service.storage.save_telegram_configuration(values)
+        telegram_configuration = TelegramConfiguration(**values)
+        approvals.chat_id = telegram_configuration.chat_id
+        approvals.user_id = telegram_configuration.user_id
+        approvals.ttl_seconds = telegram_configuration.approval_ttl_seconds
+        telegram_poll_error = False
+        return telegram_status()
 
     @app.get("/telegram/health")
     async def telegram_health() -> dict[str, Any]:
-        if telegram_configuration.missing_fields:
-            raise HTTPException(status_code=409, detail="Telegram configuration is incomplete.")
         try:
             return await telegram.health_check()
         except TelegramError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.get("/telegram/discovery")
+    async def telegram_discovery() -> list[dict[str, Any]]:
+        if service.storage.running_session() is not None:
+            raise HTTPException(409, "Pare a sessão antes de identificar o Telegram.")
+        try:
+            return await telegram.discover_destinations()
+        except TelegramError as exc:
+            raise HTTPException(409, str(exc)) from exc
 
     @app.post("/approvals/{candidate_id}")
     async def create_approval(candidate_id: str) -> dict[str, Any]:

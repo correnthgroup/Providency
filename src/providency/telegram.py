@@ -9,7 +9,9 @@ from typing import Any, Protocol
 
 
 class TelegramError(RuntimeError):
-    pass
+    def __init__(self, message: str, *, ambiguous_delivery: bool = False) -> None:
+        super().__init__(message)
+        self.ambiguous_delivery = ambiguous_delivery
 
 
 class CredentialStore(Protocol):
@@ -41,9 +43,13 @@ class TelegramPollBatch:
 class TelegramClientContract(Protocol):
     async def health_check(self) -> dict[str, Any]: ...
 
+    async def discover_destinations(self) -> list[dict[str, Any]]: ...
+
     async def send_proposal(
         self, *, chat_id: int, text: str, yes_callback: str, no_callback: str
     ) -> dict[str, Any]: ...
+
+    async def send_observation_summary(self, *, chat_id: int, text: str) -> dict[str, Any]: ...
 
     async def poll(self, *, offset: int | None = None) -> TelegramPollBatch: ...
 
@@ -72,9 +78,9 @@ class TelegramClient:
         return token
 
     async def _request(self, method: str, payload: dict[str, Any]) -> dict[str, Any]:
-        token = self._token()
-
         def execute() -> dict[str, Any]:
+            # OS credential backends may block; keep the entire I/O path off the loop.
+            token = self._token()
             request = urllib.request.Request(
                 f"https://api.telegram.org/bot{token}/{method}",
                 data=json.dumps(payload).encode(),
@@ -92,12 +98,49 @@ class TelegramClient:
                 raise TelegramError(f"Telegram rejected request {method}.")
             return dict(result)
 
-        return await asyncio.to_thread(execute)
+        try:
+            return await asyncio.wait_for(asyncio.to_thread(execute), timeout=25)
+        except TimeoutError as exc:
+            raise TelegramError(
+                "O Telegram demorou para responder. A entrega ficou ambígua; "
+                "não vou reenviar automaticamente.",
+                ambiguous_delivery=True,
+            ) from exc
 
     async def health_check(self) -> dict[str, Any]:
         result = await self._request("getMe", {})
         bot = result.get("result", {})
         return {"state": "READY", "bot_username": bot.get("username")}
+
+    async def discover_destinations(self) -> list[dict[str, Any]]:
+        # No offset: discovery must not acknowledge or consume approval callbacks.
+        result = await self._request(
+            "getUpdates", {"timeout": 0, "allowed_updates": ["message", "callback_query"]}
+        )
+        updates = result.get("result")
+        if not isinstance(updates, list):
+            raise TelegramError("Telegram returned an invalid updates payload.")
+        destinations: dict[tuple[int, int], dict[str, Any]] = {}
+        for update in updates:
+            message = update.get("message", {}) if isinstance(update, dict) else {}
+            if not isinstance(message, dict):
+                continue
+            chat, user = message.get("chat", {}), message.get("from", {})
+            text = message.get("text", "")
+            if not isinstance(chat, dict) or not isinstance(user, dict):
+                continue
+            chat_id, user_id = chat.get("id"), user.get("id")
+            command = text.split()[0].split("@")[0] if isinstance(text, str) and text else ""
+            if (command != "/start" or type(chat_id) is not int or chat_id == 0
+                    or type(user_id) is not int or user_id <= 0 or user.get("is_bot")
+                    or message.get("sender_chat")):
+                continue
+            destinations[(chat_id, user_id)] = {
+                "chat_id": chat_id, "user_id": user_id,
+                "chat_name": chat.get("title") or chat.get("first_name") or str(chat_id),
+                "user_name": user.get("username") or user.get("first_name") or str(user_id),
+            }
+        return list(destinations.values())
 
     async def send_proposal(
         self, *, chat_id: int, text: str, yes_callback: str, no_callback: str
@@ -118,8 +161,18 @@ class TelegramClient:
         message = result.get("result", {})
         return {"message_id": message.get("message_id"), "chat_id": chat_id}
 
+    async def send_observation_summary(self, *, chat_id: int, text: str) -> dict[str, Any]:
+        if not text.strip():
+            raise TelegramError("O resumo informativo não pode estar vazio.")
+        # Keep a conservative margin below Telegram's 4096-character limit.
+        if len(text) > 3900:
+            raise TelegramError("O resumo informativo excede o limite de uma mensagem.")
+        result = await self._request("sendMessage", {"chat_id": chat_id, "text": text})
+        message = result.get("result", {})
+        return {"message_id": message.get("message_id"), "chat_id": chat_id}
+
     async def poll(self, *, offset: int | None = None) -> TelegramPollBatch:
-        payload: dict[str, Any] = {"timeout": 0, "allowed_updates": ["callback_query"]}
+        payload: dict[str, Any] = {"timeout": 0, "allowed_updates": ["message", "callback_query"]}
         if offset is not None:
             payload["offset"] = offset
         result = await self._request("getUpdates", payload)
