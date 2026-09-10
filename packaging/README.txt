@@ -44,3 +44,11 @@ podem ser compreendidas.
 
 Os dados ficam no diretório local do Providency. Não remova a pasta de dados
 durante uma sessão.
+
+VALIDAÇÃO DO BUILD 0.11.0
+--------------------------
+O bundle Windows validado em 2026-09-10 foi copiado para
+"release/Providency/Providency WIN.exe". O artefato tem 491.553.119 bytes e
+SHA-256 06FAF01709F1AB6510100031CBA507686BD06BF03E849B1D622D89091D1AB95F.
+O bundle macOS é produzido e validado somente pelo workflow nativo em runner
+macOS.
