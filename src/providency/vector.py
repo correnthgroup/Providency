@@ -7,7 +7,8 @@ import io
 import os
 import re
 from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import asdict, dataclass
+from contextlib import suppress
+from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
@@ -428,10 +429,14 @@ class VectorSelectors:
         return cls(
             chart=configured(
                 "PROVIDENCY_VECTOR_CHART_SELECTOR",
-                '[data-testid*="chart" i], [class*="chart" i] canvas, canvas',
+                "#graphic-manager-content .manager-content__canvas",
             ),
             modal=configured(
-                "PROVIDENCY_VECTOR_MODAL_SELECTOR", '[role="dialog"], [aria-modal="true"]'
+                "PROVIDENCY_VECTOR_MODAL_SELECTOR",
+                (
+                    '[aria-modal="true"], '
+                    '[role="dialog"]:not(:has(#graphic-manager-content .manager-content__canvas))'
+                ),
             ),
             loading=configured(
                 "PROVIDENCY_VECTOR_LOADING_SELECTOR",
@@ -443,11 +448,11 @@ class VectorSelectors:
             ),
             symbol=configured(
                 "PROVIDENCY_VECTOR_SYMBOL_SELECTOR",
-                '[data-testid*="symbol" i], [class*="symbol" i]',
+                "#graphic-manager-content .title-bar__indicators__item__text .hover\\:underline:first-child",
             ),
             timeframe=configured(
                 "PROVIDENCY_VECTOR_TIMEFRAME_SELECTOR",
-                '[data-testid*="timeframe" i], [class*="timeframe" i]',
+                "#graphic-manager-content .title-bar__indicators__item__text .hover\\:underline:nth-child(2)",
             ),
             symbol_control=os.getenv("PROVIDENCY_VECTOR_SYMBOL_CONTROL_SELECTOR", "").strip(),
             timeframe_control=os.getenv("PROVIDENCY_VECTOR_TIMEFRAME_CONTROL_SELECTOR", "").strip(),
@@ -537,6 +542,7 @@ class ChartCapture:
     path: Path | None = None
     sha256: str | None = None
     chart_id: str | None = None
+    live_candle_visible: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
@@ -560,6 +566,7 @@ class ChartCapture:
             path=Path(str(path)) if path else None,
             sha256=str(payload["sha256"]) if payload.get("sha256") else None,
             chart_id=str(payload["chart_id"]) if payload.get("chart_id") else None,
+            live_candle_visible=payload.get("live_candle_visible") is True,
         )
 
 
@@ -1119,11 +1126,19 @@ class VectorAdapter:
             "source": "Vector Web · tela de ordens",
         }
 
-    def __init__(self, settings: Settings, *, selectors: VectorSelectors | None = None) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        *,
+        selectors: VectorSelectors | None = None,
+        pages_provider: Callable[[], Awaitable[list[Any]]] | None = None,
+        browser_lock: asyncio.Lock | None = None,
+    ) -> None:
         self.settings = settings
         self.selectors = selectors or VectorSelectors.from_env()
         self.capture_service = ChartCaptureService(settings.capture_dir, selectors=self.selectors)
-        self._lock = asyncio.Lock()
+        self._lock = browser_lock or asyncio.Lock()
+        self._pages_provider = pages_provider
         self._playwright: Any = None
         self._context: Any = None
         self._page: Any = None
@@ -1174,6 +1189,13 @@ class VectorAdapter:
             return {"state": "WAITING_FOR_MANUAL_LOGIN", "url": str(self._page.url)}
 
     async def health_check(self) -> dict[str, str]:
+        if self._pages_provider is not None:
+            async with self._lock:
+                try:
+                    pages = await self._pages_provider()
+                    return {"state": "OPEN" if pages else "CLOSED"}
+                except (ValueError, RuntimeError):
+                    return {"state": "CLOSED"}
         running = (
             self._context is not None
             and self._page is not None
@@ -1182,6 +1204,16 @@ class VectorAdapter:
         return {"state": "OPEN" if running else "CLOSED"}
 
     async def capture_primary_chart(self) -> ChartCapture:
+        if self._pages_provider is not None:
+            async with self._lock:
+                charts = await discover_browser_charts(await self._pages_provider())
+                active = [chart for chart in charts if chart["active"]]
+                if len(active) != 1:
+                    raise VectorAdapterError(
+                        "PV-VECTOR-024", "Selecione um único gráfico ativo na Vector."
+                    )
+                chart_id = str(active[0]["id"])
+            return await self.capture_chart(chart_id)
         async with self._lock:
             if self._page is None:
                 raise VectorAdapterError("PV-VECTOR-002", "Open Vector Web before capturing.")
@@ -1195,16 +1227,23 @@ class VectorAdapter:
     async def capture_chart(self, chart_id: str) -> ChartCapture:
         """Activate one stable internal tab, verify PRE/POST, then capture it."""
         async with self._lock:
-            if self._page is None:
-                raise VectorAdapterError("PV-VECTOR-002", "Open Vector Web before capturing.")
-            charts = await discover_browser_charts([self._page])
-            target = next((chart for chart in charts if chart["id"] == chart_id), None)
-            if target is None:
+            pages = (
+                await self._pages_provider()
+                if self._pages_provider
+                else ([self._page] if self._page is not None else [])
+            )
+            charts = await discover_browser_charts(pages)
+            targets = [chart for chart in charts if chart["id"] == chart_id]
+            if len(targets) != 1:
                 raise VectorAdapterError(
-                    "PV-VECTOR-023", "O gráfico confirmado não está disponível."
+                    "PV-VECTOR-023",
+                    "O gráfico confirmado não está disponível ou ficou ambíguo. Refaça a preparação.",
                 )
+            target = targets[0]
+            page = next(page for page in pages if _page_identity(page) == target["page_id"])
+            await page.bring_to_front()
             if not target["active"]:
-                tabs = await self._page.locator('[data-testid="asset-tab"]').all()
+                tabs = await page.locator('[data-testid="asset-tab"]').all()
                 matches = []
                 for tab in tabs:
                     if await tab.get_attribute("str-asset-key-entity") == target["key"]:
@@ -1212,23 +1251,52 @@ class VectorAdapter:
                 if len(matches) != 1:
                     raise VectorAdapterError("PV-VECTOR-024", "A aba confirmada ficou ambígua.")
                 await matches[0].click()
-                after = await discover_browser_charts([self._page])
+                after = await discover_browser_charts([page])
                 selected = next((chart for chart in after if chart["id"] == chart_id), None)
                 if selected is None or not selected["active"]:
                     raise VectorAdapterError(
                         "PV-VECTOR-025", "A seleção da aba não foi confirmada."
                     )
-            capture = await self.capture_service.capture(PlaywrightPageProbe(self._page))
-            return ChartCapture(
-                **{
-                    **capture.to_dict(),
-                    "disposition": capture.disposition,
-                    "issue": capture.issue,
-                    "path": capture.path,
-                    "region": capture.region,
-                    "chart_id": chart_id,
-                }
+            # Vector recreates the chart canvas briefly after an internal asset-tab
+            # change. Wait for the replacement canvas before applying the normal
+            # fail-closed capture checks.
+            with suppress(Exception):
+                # Preserve the capture service's specific CHART_NOT_FOUND result
+                # when the canvas never becomes usable.
+                await page.locator(self.selectors.chart).wait_for(state="visible", timeout=5_000)
+            clock = page.locator(".candle-clock")
+            live_before = await clock.count() == 1 and await clock.is_visible()
+            clock_before = (await clock.inner_text()).strip() if live_before else ""
+            capture = await self.capture_service.capture(PlaywrightPageProbe(page))
+            after = await discover_browser_charts([page])
+            selected_after = [
+                chart for chart in after if chart["id"] == chart_id and chart["active"]
+            ]
+            if len(selected_after) != 1 or any(
+                selected_after[0][key] != target[key] for key in ("symbol", "timeframe")
+            ):
+                return replace(
+                    capture,
+                    disposition=CaptureDisposition.NO_DECISION,
+                    issue=CaptureIssue.APPLIED_STATE_MISMATCH,
+                    chart_id=chart_id,
+                )
+            if capture.disposition is CaptureDisposition.USABLE and (
+                capture.symbol != target["symbol"] or capture.timeframe != target["timeframe"]
+            ):
+                return replace(
+                    capture,
+                    disposition=CaptureDisposition.NO_DECISION,
+                    issue=CaptureIssue.APPLIED_STATE_MISMATCH,
+                    chart_id=chart_id,
+                )
+            live_after = await clock.count() == 1 and await clock.is_visible()
+            clock_after = (await clock.inner_text()).strip() if live_after else ""
+            live = bool(
+                re.fullmatch(r"\d{1,3}:\d{2}(?::\d{2})?", clock_before)
+                and re.fullmatch(r"\d{1,3}:\d{2}(?::\d{2})?", clock_after)
             )
+            return replace(capture, chart_id=chart_id, live_candle_visible=live)
 
     async def sync_analysis_state(self, desired: DesiredVectorState) -> StateSyncResult:
         async with self._lock:

@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+from PIL import Image, ImageDraw
 
 from providency.patterns import PatternPackage, PatternPackageError
 
@@ -45,8 +46,9 @@ class PatternCatalogError(ValueError):
 
 
 class PatternCatalog:
-    def __init__(self, root: Path) -> None:
+    def __init__(self, root: Path, *, illustration_dir: Path | None = None) -> None:
         self.root = root.resolve()
+        self.illustration_dir = illustration_dir
         self.items: tuple[PatternCatalogItem, ...] = self._load()
 
     def _load(self) -> tuple[PatternCatalogItem, ...]:
@@ -119,4 +121,48 @@ class PatternCatalog:
         return hashlib.sha256(payload.encode()).hexdigest()[:16]
 
     def to_list(self) -> list[dict[str, Any]]:
-        return [item.to_dict() for item in self.items]
+        result = []
+        for item in self.items:
+            entry = item.to_dict()
+            if self.illustration_dir is not None:
+                path = self._illustration(item)
+                entry["illustration"] = {
+                    "label": "Ilustração didática · exemplo do pacote",
+                    "path": str(path) if path else None,
+                }
+            result.append(entry)
+        return result
+
+    def _illustration(self, item: PatternCatalogItem) -> Path | None:
+        """Render the package's positive fixture, never label it as market evidence."""
+        samples = sorted((item.path.parent / "positive").glob("*.yaml"))
+        if not samples or self.illustration_dir is None:
+            return None
+        source = samples[0].read_bytes()
+        digest = hashlib.sha256(source).hexdigest()[:16]
+        path = self.illustration_dir / f"{item.package.id}-{digest}.webp"
+        if path.is_file():
+            return path
+        sample = yaml.safe_load(source)
+        candles = sample.get("candles", [])
+        if not candles:
+            return None
+        low = min(float(c["low"]) for c in candles)
+        high = max(float(c["high"]) for c in candles)
+        if high <= low:
+            return None
+        image = Image.new("RGB", (640, 300), "#141b25")
+        draw = ImageDraw.Draw(image)
+
+        def y(value: float) -> float:
+            return 260 - (value - low) / (high - low) * 220
+
+        for index, candle in enumerate(candles):
+            x = (index + 1) * 640 / (len(candles) + 1)
+            color = "#01c97e" if candle["close"] > candle["open"] else "#d03646"
+            draw.line((x, y(candle["high"]), x, y(candle["low"])), fill=color, width=3)
+            top, bottom = sorted((y(candle["open"]), y(candle["close"])))
+            draw.rectangle((x - 22, top, x + 22, max(bottom, top + 2)), fill=color)
+        self.illustration_dir.mkdir(parents=True, exist_ok=True)
+        image.save(path, format="WEBP", lossless=True)
+        return path

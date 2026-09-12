@@ -12,8 +12,9 @@ from typing import Any, Literal
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse
 from playwright.async_api import Error as PlaywrightError
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, SecretStr, field_validator
 
+from providency import __version__
 from providency.approvals import ApprovalError, ApprovalService, render_proposal
 from providency.catalog import PatternCatalog, PatternCatalogError
 from providency.config import (
@@ -89,6 +90,10 @@ class EmergencyStopPayload(BaseModel):
 
 class ShutdownPayload(BaseModel):
     confirm: Literal[True]
+
+
+class SessionTelegramTokenPayload(BaseModel):
+    token: SecretStr
 
 
 class RedactionPayload(BaseModel):
@@ -194,8 +199,16 @@ def create_app(
     onboarding = Onboarding(resolved)
     vector_snapshot: dict[str, Any] | None = None
     service = EngineService(Storage(resolved.database_path), recover=recover)
-    adapter = vector_adapter or VectorAdapter(resolved)
-    catalog = PatternCatalog(resolved.pattern_catalog_dir)
+
+    async def vector_pages() -> list[Any]:
+        return await onboarding.pages("web.vectorcrypto.com")
+
+    adapter = vector_adapter or VectorAdapter(
+        resolved, pages_provider=vector_pages, browser_lock=onboarding.lock
+    )
+    catalog = PatternCatalog(
+        resolved.pattern_catalog_dir, illustration_dir=resolved.data_dir / "catalog-illustrations"
+    )
     matcher = PatternMatcher(
         PatternPackage.load(resolved.pattern_catalog_dir / "bearish_engulfing" / "pattern.yaml")
     )
@@ -264,8 +277,11 @@ def create_app(
             await observation.close()
             await adapter.stop()
             await onboarding.close()
+            clear_token = getattr(telegram, "clear_session_token", None)
+            if callable(clear_token):
+                clear_token()
 
-    app = FastAPI(title="Providency Core Engine", version="0.11.0", lifespan=lifespan)
+    app = FastAPI(title="Providency Core Engine", version=__version__, lifespan=lifespan)
     onboarding.install(app)
 
     @app.middleware("http")
@@ -416,10 +432,12 @@ def create_app(
     def observation_configuration() -> dict[str, Any]:
         state = observation.state()
         configuration = dict(state["configuration"])
-        configuration.update({
-            "state": observation.phase.value,
-            "editable": observation.phase in {ObservationPhase.STOPPED, ObservationPhase.ERROR},
-        })
+        configuration.update(
+            {
+                "state": observation.phase.value,
+                "editable": observation.phase in {ObservationPhase.STOPPED, ObservationPhase.ERROR},
+            }
+        )
         return configuration
 
     @app.put("/observation/configuration")
@@ -446,6 +464,18 @@ def create_app(
 
     @app.post("/observation/start")
     async def observation_start() -> dict[str, Any]:
+        if vector_adapter is None and observation.phase in {
+            ObservationPhase.STOPPED,
+            ObservationPhase.ERROR,
+        }:
+            prepared = onboarding.state()
+            if not prepared["connected"] or prepared["stage"] != "READY":
+                raise HTTPException(
+                    409, "Conclua a preparação da Vector e do Telegram antes de iniciar."
+                )
+            observation.configure(
+                {**observation.configuration.to_dict(), "charts": prepared["charts"]}
+            )
         if not observation.configuration.charts:
             onboarding_charts = onboarding.state().get("charts", [])
             if onboarding_charts:
@@ -478,7 +508,15 @@ def create_app(
 
     @app.get("/patterns/catalog")
     def patterns_catalog() -> list[dict[str, Any]]:
-        return catalog.to_list()
+        entries = catalog.to_list()
+        references = service.storage.observation_pattern_references()
+        for entry in entries:
+            reference = references.get((entry["id"], entry["version"]))
+            if reference:
+                path = Path(reference["path"]).resolve()
+                if path.is_relative_to(resolved.capture_dir.resolve()) and path.is_file():
+                    entry["reference_capture"] = reference
+        return entries
 
     @app.get("/sessions/{session_id}/report")
     def session_report(session_id: str) -> dict[str, Any]:
@@ -1181,6 +1219,55 @@ def create_app(
             return await telegram.health_check()
         except TelegramError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.get("/telegram/credential-status")
+    async def telegram_credential_status() -> dict[str, bool]:
+        reader = getattr(telegram, "credential_status", None)
+        status = await reader() if callable(reader) else {}
+        return {
+            key: status.get(key) is True if isinstance(status, dict) else False
+            for key in ("saved", "valid_format", "unavailable", "session_only")
+        }
+
+    @app.put("/telegram/session-token")
+    async def use_telegram_session_token(
+        payload: SessionTelegramTokenPayload, request: Request
+    ) -> dict[str, bool]:
+        if request.headers.get("origin") not in {
+            None,
+            f"http://127.0.0.1:{resolved.ui_port}",
+            f"http://localhost:{resolved.ui_port}",
+        }:
+            raise HTTPException(403, "Use o painel local do Providency.")
+        if observation.phase not in {ObservationPhase.STOPPED, ObservationPhase.ERROR}:
+            raise HTTPException(409, "Pare o bot antes de trocar a credencial.")
+        if service.storage.running_session() is not None or active_callbacks:
+            raise HTTPException(409, "Pare a sessão antes de trocar a credencial.")
+        setter = getattr(telegram, "use_session_token", None)
+        if not callable(setter):
+            raise HTTPException(409, "Cliente Telegram sem suporte a credencial temporária.")
+        try:
+            setter(payload.token.get_secret_value().strip())
+        except TelegramError as exc:
+            raise HTTPException(422, str(exc)) from None
+        return {"session_only": True}
+
+    @app.delete("/telegram/session-token")
+    async def clear_telegram_session_token(request: Request) -> dict[str, bool]:
+        if request.headers.get("origin") not in {
+            None,
+            f"http://127.0.0.1:{resolved.ui_port}",
+            f"http://localhost:{resolved.ui_port}",
+        }:
+            raise HTTPException(403, "Use o painel local do Providency.")
+        if observation.phase not in {ObservationPhase.STOPPED, ObservationPhase.ERROR}:
+            raise HTTPException(409, "Pare o bot antes de remover a credencial.")
+        if service.storage.running_session() is not None or active_callbacks:
+            raise HTTPException(409, "Pare a sessão antes de remover a credencial.")
+        clearer = getattr(telegram, "clear_session_token", None)
+        if callable(clearer):
+            clearer()
+        return {"session_only": False}
 
     @app.get("/telegram/discovery")
     async def telegram_discovery() -> list[dict[str, Any]]:

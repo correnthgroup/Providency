@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import importlib.util
+import os
+import runpy
+import sys
 from pathlib import Path
 
 
@@ -35,4 +38,19 @@ def test_package_build_bundles_streamlit_playwright_browser_and_assets() -> None
 def test_release_readme_documents_single_instance_and_safe_default() -> None:
     readme = (Path(__file__).parents[1] / "packaging" / "README.txt").read_text(encoding="utf-8")
     assert "um único Core Engine" in readme
-    assert "DRY_RUN" in readme
+    assert "OBSERVATION_ONLY" in readme
+
+
+def test_frozen_launcher_defaults_to_observation(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "_MEIPASS", str(tmp_path), raising=False)
+    monkeypatch.setattr(sys, "argv", ["Providency WIN.exe"])
+    monkeypatch.delenv("PROVIDENCY_EXECUTION_MODE", raising=False)
+    monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", str(tmp_path))
+    seen = []
+    monkeypatch.setattr(
+        "providency.runtime.run_launcher",
+        lambda: seen.append(os.environ["PROVIDENCY_EXECUTION_MODE"]),
+    )
+    runpy.run_path(str(Path(__file__).parents[1] / "packaging/entrypoint.py"), run_name="__main__")
+    assert seen == ["OBSERVATION_ONLY"]

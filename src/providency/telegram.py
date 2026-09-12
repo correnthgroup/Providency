@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -12,6 +13,10 @@ class TelegramError(RuntimeError):
     def __init__(self, message: str, *, ambiguous_delivery: bool = False) -> None:
         super().__init__(message)
         self.ambiguous_delivery = ambiguous_delivery
+
+
+def valid_token_format(value: str) -> bool:
+    return bool(re.fullmatch(r"[0-9]+:[A-Za-z0-9_-]{20,}", value))
 
 
 class CredentialStore(Protocol):
@@ -67,8 +72,19 @@ class TelegramClient:
         self.credential_store = credential_store or KeyringCredentialStore()
         self.service = service
         self.username = username
+        self._session_token: str | None = None
+
+    def use_session_token(self, token: str) -> None:
+        if not valid_token_format(token):
+            raise TelegramError("O token informado não tem o formato esperado.")
+        self._session_token = token
+
+    def clear_session_token(self) -> None:
+        self._session_token = None
 
     def _token(self) -> str:
+        if self._session_token is not None:
+            return self._session_token
         try:
             token = self.credential_store.get_password(self.service, self.username)
         except Exception as exc:
@@ -76,6 +92,19 @@ class TelegramClient:
         if not token:
             raise TelegramError("Telegram bot token is missing from the credential store.")
         return token
+
+    async def credential_status(self) -> dict[str, bool]:
+        if self._session_token is not None:
+            return {"saved": False, "valid_format": True, "session_only": True}
+
+        def read() -> dict[str, bool]:
+            value = self.credential_store.get_password(self.service, self.username)
+            return {"saved": bool(value), "valid_format": bool(value and valid_token_format(value))}
+
+        try:
+            return await asyncio.to_thread(read)
+        except Exception:
+            return {"saved": False, "valid_format": False, "unavailable": True}
 
     async def _request(self, method: str, payload: dict[str, Any]) -> dict[str, Any]:
         def execute() -> dict[str, Any]:
@@ -90,8 +119,35 @@ class TelegramClient:
             try:
                 with urllib.request.urlopen(request, timeout=15) as response:
                     result = json.loads(response.read().decode())
-            except (OSError, ValueError, urllib.error.URLError) as exc:
-                raise TelegramError(f"Telegram request {method} failed.") from exc
+            except urllib.error.HTTPError as exc:
+                if exc.code in {401, 404}:
+                    message = (
+                        "O Telegram não reconheceu o token informado (HTTP "
+                        + str(exc.code)
+                        + "). Confira o token completo no BotFather e informe-o novamente."
+                    )
+                elif exc.code == 403:
+                    message = (
+                        "O bot não tem permissão no destino Telegram (HTTP 403). "
+                        "Confira sua participação no grupo."
+                    )
+                elif exc.code == 429:
+                    message = (
+                        "O Telegram limitou as solicitações (HTTP 429). "
+                        "Aguarde antes de tentar novamente."
+                    )
+                else:
+                    message = (
+                        f"O Telegram respondeu com erro HTTP {exc.code}. "
+                        "Tente novamente mais tarde."
+                    )
+                raise TelegramError(message) from None
+            except (OSError, ValueError, urllib.error.URLError):
+                raise TelegramError(
+                    "Não foi possível concluir a conexão com o Telegram. "
+                    "A credencial não foi alterada; confira a conexão e tente novamente.",
+                    ambiguous_delivery=method == "sendMessage",
+                ) from None
             if not isinstance(result, dict):
                 raise TelegramError(f"Telegram returned an invalid response for {method}.")
             if not result.get("ok"):
@@ -102,9 +158,13 @@ class TelegramClient:
             return await asyncio.wait_for(asyncio.to_thread(execute), timeout=25)
         except TimeoutError as exc:
             raise TelegramError(
-                "O Telegram demorou para responder. A entrega ficou ambígua; "
-                "não vou reenviar automaticamente.",
-                ambiguous_delivery=True,
+                (
+                    "O Telegram demorou para responder. A entrega ficou ambígua; "
+                    "não vou reenviar automaticamente."
+                    if method == "sendMessage"
+                    else "O Telegram demorou para responder. Tente novamente."
+                ),
+                ambiguous_delivery=method == "sendMessage",
             ) from exc
 
     async def health_check(self) -> dict[str, Any]:
@@ -131,12 +191,19 @@ class TelegramClient:
                 continue
             chat_id, user_id = chat.get("id"), user.get("id")
             command = text.split()[0].split("@")[0] if isinstance(text, str) and text else ""
-            if (command != "/start" or type(chat_id) is not int or chat_id == 0
-                    or type(user_id) is not int or user_id <= 0 or user.get("is_bot")
-                    or message.get("sender_chat")):
+            if (
+                command != "/start"
+                or type(chat_id) is not int
+                or chat_id == 0
+                or type(user_id) is not int
+                or user_id <= 0
+                or user.get("is_bot")
+                or message.get("sender_chat")
+            ):
                 continue
             destinations[(chat_id, user_id)] = {
-                "chat_id": chat_id, "user_id": user_id,
+                "chat_id": chat_id,
+                "user_id": user_id,
                 "chat_name": chat.get("title") or chat.get("first_name") or str(chat_id),
                 "user_name": user.get("username") or user.get("first_name") or str(user_id),
             }
@@ -151,10 +218,12 @@ class TelegramClient:
                 "chat_id": chat_id,
                 "text": text,
                 "reply_markup": {
-                    "inline_keyboard": [[
-                        {"text": "SIM", "callback_data": yes_callback},
-                        {"text": "NÃO", "callback_data": no_callback},
-                    ]]
+                    "inline_keyboard": [
+                        [
+                            {"text": "SIM", "callback_data": yes_callback},
+                            {"text": "NÃO", "callback_data": no_callback},
+                        ]
+                    ]
                 },
             },
         )

@@ -3,6 +3,8 @@ from typing import Any
 
 import streamlit as st
 
+from providency.telegram import valid_token_format
+
 
 def render_telegram(state: dict[str, Any], action: Callable[..., Any]) -> None:
     if st.session_state.pop("clear_telegram_token", False):
@@ -17,25 +19,49 @@ def render_telegram(state: dict[str, Any], action: Callable[..., Any]) -> None:
     destination = state.get("browser_destination")
     if destination:
         st.caption(f"Conversa conferida no navegador: {destination['name']}")
-    with st.expander(
-        "1 · Criar e conectar o bot", expanded=bool(configuration.get("missing_fields"))
-    ):
+    with st.container(border=True):
+        st.markdown("**1 · Token e conexão do bot**")
+        credential = action("GET", "/telegram/credential-status") or {}
+        if credential.get("session_only"):
+            st.success("Token disponível somente nesta sessão, sem gravação no cofre.")
+        if credential.get("saved"):
+            if credential.get("valid_format"):
+                st.success(
+                    "Token salvo no cofre deste computador. "
+                    "Não é preciso informar novamente ao reabrir o aplicativo."
+                )
+            else:
+                st.error(
+                    "Há um valor salvo no cofre, mas ele não tem o formato de um token "
+                    "do Telegram. Corrija-o abaixo."
+                )
         st.markdown(
             "Abra [BotFather](https://t.me/BotFather), envie `/newbot` e escolha um nome "
             "de usuário terminado em `bot`. Adicione o bot ao grupo Providency. "
-            "Cole o token abaixo; ele será salvo somente no cofre deste computador."
+            "Cole o token abaixo e escolha entre uso temporário e salvamento no cofre."
         )
-        with st.form("telegram_token_form", clear_on_submit=True):
-            token = st.text_input("Token do bot", type="password", key="telegram_token",
-                                  help="Credencial fornecida pelo BotFather. Não é salva no banco.")
-            save_token = st.form_submit_button(
-                "Salvar token no cofre", disabled=state.get("session_active", False)
-            )
-        if save_token:
+        token = st.text_input(
+            "Token do bot",
+            type="password",
+            key="telegram_token",
+            help="Credencial fornecida pelo BotFather. Não é salva no banco.",
+        )
+        credential_disabled = state.get("session_active", False)
+        save_token = st.button("Salvar token no cofre", disabled=credential_disabled)
+        temporary_token = st.button("Usar somente nesta sessão", disabled=credential_disabled)
+        if save_token or temporary_token:
             st.session_state.pop("telegram_bot_username", None)
             st.session_state.pop("telegram_destinations", None)
             if not token.strip():
                 st.error("Cole o token fornecido pelo BotFather.")
+            elif not valid_token_format(token.strip()):
+                st.error(
+                    "Token inválido: copie somente o token completo fornecido pelo BotFather "
+                    "(número, dois-pontos e chave). O cofre não foi alterado."
+                )
+            elif temporary_token:
+                if action("PUT", "/telegram/session-token", {"token": token.strip()}):
+                    st.session_state["telegram_token_temporary"] = True
             else:
                 try:
                     import keyring
@@ -45,10 +71,13 @@ def render_telegram(state: dict[str, Any], action: Callable[..., Any]) -> None:
                     st.error("Não foi possível salvar no cofre de credenciais deste computador.")
                 else:
                     st.session_state["telegram_token_saved"] = True
-            token = ""
-            st.session_state["clear_telegram_token"] = True
-            if st.session_state.get("telegram_token_saved"):
+            if st.session_state.get("telegram_token_saved") or st.session_state.get(
+                "telegram_token_temporary"
+            ):
+                st.session_state["clear_telegram_token"] = True
                 st.rerun()
+        if st.session_state.pop("telegram_token_temporary", False):
+            st.success("Token ativado apenas em memória. Será removido ao encerrar o aplicativo.")
         if st.session_state.pop("telegram_token_saved", False):
             st.success("Token salvo no cofre.")
         if st.button("Testar bot"):
@@ -77,23 +106,33 @@ def render_telegram(state: dict[str, Any], action: Callable[..., Any]) -> None:
     choices = st.session_state.get("telegram_destinations", [])
     if choices:
         selected = st.selectbox(
-            "Grupo e usuário encontrados", range(len(choices)),
+            "Grupo e usuário encontrados",
+            range(len(choices)),
             format_func=lambda i: (
                 f"{choices[i]['chat_name']} ({choices[i]['chat_id']}) · "
                 f"{choices[i]['user_name']} ({choices[i]['user_id']})"
             ),
         )
-        ttl = st.number_input("Prazo para aprovar (segundos)", min_value=1,
-                              value=int(configuration.get("approval_ttl_seconds", 60)),
-                              help="Depois deste prazo, a proposta expira.")
+        ttl = st.number_input(
+            "Prazo para aprovar (segundos)",
+            min_value=1,
+            value=int(configuration.get("approval_ttl_seconds", 60)),
+            help="Depois deste prazo, a proposta expira.",
+        )
         if st.button("Confirmar destino e aprovador", type="primary"):
             choice = choices[selected]
-            result = action("PUT", "/telegram/configuration", {
-                "chat_id": choice["chat_id"], "user_id": choice["user_id"],
-                "approval_ttl_seconds": int(ttl),
-                "recheck_price_tolerance_ticks": configuration.get(
-                    "recheck_price_tolerance_ticks", 1),
-            })
+            result = action(
+                "PUT",
+                "/telegram/configuration",
+                {
+                    "chat_id": choice["chat_id"],
+                    "user_id": choice["user_id"],
+                    "approval_ttl_seconds": int(ttl),
+                    "recheck_price_tolerance_ticks": configuration.get(
+                        "recheck_price_tolerance_ticks", 1
+                    ),
+                },
+            )
             if result:
                 st.session_state.pop("telegram_destinations", None)
                 st.rerun()

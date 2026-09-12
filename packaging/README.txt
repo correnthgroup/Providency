@@ -35,9 +35,18 @@ O modo OBSERVATION_ONLY lê somente screenshots novas e envia um resumo de
 padrões ao chat confirmado. Ele não cria propostas, aprovações, WOULD_EXECUTE,
 ordens, sincronizações financeiras, stops ou fechamentos.
 
+TOKEN TELEGRAM
+--------------
+Salve o token completo uma vez em Configurações > Telegram. Ele permanece no
+cofre do Windows após fechar ou atualizar o aplicativo. O campo fica vazio
+para não expor a credencial; o painel informa se ela está salva. Um erro de
+rede não apaga o token. Valores malformados não substituem a credencial salva.
+Para testes sem persistência, escolha "Usar somente nesta sessão". Essa opção
+mantém o token apenas na memória do motor e o remove ao encerrar o aplicativo.
+
 SEGURANÇA
 ---------
-O modo padrão é DRY_RUN: nenhuma ordem financeira chega à Vector. O modo DEMO
+O bundle inicia em OBSERVATION_ONLY: nenhuma ordem financeira chega à Vector. O modo DEMO
 exige configuração explícita e somente aceita uma conta demo positivamente
 verificada. SAFE_STOP bloqueia nova exposição quando posição ou proteção não
 podem ser compreendidas.
@@ -45,10 +54,10 @@ podem ser compreendidas.
 Os dados ficam no diretório local do Providency. Não remova a pasta de dados
 durante uma sessão.
 
-VALIDAÇÃO DO BUILD 0.11.0
+BUILD 0.11.1
 --------------------------
-O bundle Windows validado em 2026-09-10 foi copiado para
-"release/Providency/Providency WIN.exe". O artefato tem 491.553.119 bytes e
-SHA-256 06FAF01709F1AB6510100031CBA507686BD06BF03E849B1D622D89091D1AB95F.
+Captura pelo navegador conectado, imagens de referência no catálogo e
+diagnóstico de Telegram/cofre. Consulte docs/observation-0.11.1-validation.md
+no código-fonte para evidências e pendências do teste real.
 O bundle macOS é produzido e validado somente pelo workflow nativo em runner
 macOS.

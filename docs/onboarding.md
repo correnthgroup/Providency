@@ -5,7 +5,7 @@ GIFs and reads launcher-owned checkpoints from the local data directory. Progres
 reaches 100% only after the engine health check succeeds. Startup cancellation and
 the existing application shutdown remain explicit actions.
 
-The default navigation is Início, Conexões, Configurações, Atividades. Iniciar BOT
+The default navigation is Início, Configurações, Atividades. Iniciar BOT
 starts preparation only: browser pairing, Vector chart discovery and confirmation,
 Telegram Web selected-chat discovery and destination confirmation. The last screen
 does not start monitoring, execute orders or send messages. Advanced controls remain
@@ -27,7 +27,29 @@ pairing again. Firefox, Safari and Telegram Desktop are not supported by this co
 Vector discovery reads every internal asset tab, including its own timeframe and
 stable chart identifier. Telegram discovery reads only the selected-chat header and
 peer reference. Confirmation identifies the intended destination; it does not prove
-Bot API membership, group type or sending permission. Those remain a subsequent step.
+Bot API membership, group type or sending permission.
+
+## Telegram Bot API setup
+
+In Configurações, create a bot through the official BotFather and add it to the
+intended group. Save its token using the password field: only the operating system
+credential store receives the secret, under Providency / telegram-bot-token.
+Testar bot calls getMe; success validates the credential, not message delivery.
+
+The intended approver sends `/start@YourBot` in the destination group, then clicks
+Identificar grupo e usuário in Providency. Discovery reads recent Bot API messages
+without acknowledging update offsets. It only suggests explicit /start senders;
+anonymous administrators and bots are excluded. The operator must confirm the
+displayed chat and user. Browser peer identifiers are never treated as Bot API IDs.
+
+Confirmation persists chat, approver, TTL and recheck tolerance in the local SQLite
+database, applies them immediately, and enables polling for the next running session.
+Configuration changes are blocked during an active session. Saved settings survive
+restart; an explicit Settings.telegram_configuration override takes precedence in
+embedded/test usage, otherwise persisted settings precede environment defaults.
+
+No test message or trading proposal is sent during setup. Real delivery and approval
+testing requires a created bot, its credential, group access and the chosen approver.
 
 ## Validation and remaining integration
 

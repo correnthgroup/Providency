@@ -25,6 +25,9 @@ if TYPE_CHECKING:
     from fastapi import FastAPI
 
 
+ENGINE_SHUTDOWN_TIMEOUT_SECONDS = 35
+
+
 def create_app(settings: Settings, *, request_shutdown: Callable[[], None]) -> FastAPI:
     # Import the engine only in its own process, after the loading UI is visible.
     from providency.api import create_app as factory
@@ -210,7 +213,12 @@ def run_launcher() -> None:
         while engine.poll() is None:
             if ui.poll() is not None:
                 if _request_engine_shutdown(settings.api_url):
-                    engine.wait(timeout=20)
+                    # Observation cleanup may wait up to 25 seconds for an in-flight
+                    # capture or Telegram request. Leave enough time for that bounded
+                    # cleanup, but let the launcher finally block terminate a stuck
+                    # process instead of surfacing TimeoutExpired to the operator.
+                    with suppress(subprocess.TimeoutExpired):
+                        engine.wait(timeout=ENGINE_SHUTDOWN_TIMEOUT_SECONDS)
                     break
                 # If a demo position blocks shutdown, restore the control panel.
                 ui = subprocess.Popen(ui_command)

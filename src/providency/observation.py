@@ -4,7 +4,7 @@ from __future__ import annotations
 import asyncio
 import html
 from collections.abc import Awaitable, Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any, cast
@@ -86,6 +86,7 @@ class ObservationResult:
     analysis: str
     pattern_results: tuple[dict[str, Any], ...]
     reason: str
+    evidence: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -96,6 +97,7 @@ class ObservationResult:
             "analysis": self.analysis,
             "pattern_results": [dict(item) for item in self.pattern_results],
             "reason": self.reason,
+            "evidence": self.evidence,
         }
 
 
@@ -247,7 +249,10 @@ class ObservationCoordinator:
         usable = 0
         failed = 0
         for chart in self.configuration.charts:
+            if self._stop.is_set():
+                break
             chart_id = str(chart["id"])
+            capture: ChartCapture | None = None
             try:
                 self.phase = ObservationPhase.CAPTURING
                 capture = await self._capture(chart_id)
@@ -268,10 +273,14 @@ class ObservationCoordinator:
                     usable += 1
                 if result.analysis == "ANALYSIS_ERROR" or result.capture == "FAILED":
                     failed += 1
+            if capture is not None:
+                result = replace(result, evidence=capture.to_dict())
             results.append(result)
             self.storage.record_observation_result(cycle_id, result.to_dict())
         status = (
-            CycleStatus.FAILED
+            CycleStatus.CANCELLED
+            if self._stop.is_set()
+            else CycleStatus.FAILED
             if failed == len(results)
             else CycleStatus.PARTIAL
             if failed
@@ -295,9 +304,13 @@ class ObservationCoordinator:
 
     async def _run(self) -> None:
         try:
-            await self.run_cycle_once()
             anchor = self.clock()
+            await self.run_cycle_once()
             while not self._stop.is_set():
+                if self.last_cycle and self.last_cycle["status"] == CycleStatus.FAILED.value:
+                    raise RuntimeError(
+                        "Nenhum gráfico pôde ser analisado. Confira a conexão e refaça a preparação antes de iniciar."
+                    )
                 self.phase = ObservationPhase.WAITING
                 self.next_capture_at = self.configuration.interval.next_at(
                     anchor, after=self.clock()
@@ -307,7 +320,6 @@ class ObservationCoordinator:
                     await asyncio.wait_for(self._stop.wait(), timeout=delay)
                 except TimeoutError:
                     await self.run_cycle_once()
-                    anchor = anchor
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -325,6 +337,19 @@ class ObservationCoordinator:
     async def _analyze(
         self, chart_id: str, chart: dict[str, Any], capture: ChartCapture
     ) -> ObservationResult:
+        if capture.disposition is CaptureDisposition.USABLE and any(
+            chart.get(key) and chart[key] != getattr(capture, key)
+            for key in ("symbol", "timeframe")
+        ):
+            return ObservationResult(
+                chart_id,
+                chart.get("symbol"),
+                chart.get("timeframe"),
+                "NO_DECISION",
+                "NO_DECISION",
+                (),
+                "O gráfico mudou; refaça a preparação.",
+            )
         if capture.disposition is not CaptureDisposition.USABLE:
             return ObservationResult(
                 chart_id,
@@ -359,7 +384,14 @@ class ObservationCoordinator:
             for item in (item for item in self.catalog.enabled if item.package.id in active_ids):
                 package = item.package
                 matcher = PatternMatcher(package)
-                selected = window.candles[-(package.sequence_candles + package.preceding_candles) :]
+                # The rightmost candle may still be forming. A visible successor is
+                # required for BAR_CLOSE; never confirm the final candle from a clock.
+                candidates = (
+                    window.candles[:-1]
+                    if package.confirmation_mode == "BAR_CLOSE"
+                    else window.candles
+                )
+                selected = candidates[-(package.sequence_candles + package.preceding_candles) :]
                 context = selected[: package.preceding_candles]
                 sequence = selected[package.preceding_candles :]
                 evidence = PatternEvidence(
@@ -379,7 +411,13 @@ class ObservationCoordinator:
                         "pattern_id": result.pattern_id,
                         "pattern_version": result.pattern_version,
                         "display_name_pt": package.display_name_pt,
-                        "status": result.status.value,
+                        "status": (
+                            PatternStatus.FORMING.value
+                            if result.status is PatternStatus.MATCH
+                            and package.confirmation_mode == "BAR_CLOSE"
+                            and not capture.live_candle_visible
+                            else result.status.value
+                        ),
                         "reason": result.reason,
                     }
                 )
@@ -425,6 +463,8 @@ class ObservationCoordinator:
         ]
         for item in results:
             name = html.escape(str(item.symbol or item.chart_id))
+            if item.timeframe:
+                name += f" · {html.escape(item.timeframe)}"
             if item.analysis == "ANALYSIS_ERROR":
                 lines.append(f"{name}: não pôde ser analisado ({html.escape(item.reason)}).")
                 continue
@@ -437,6 +477,13 @@ class ObservationCoordinator:
                 lines.append(f"{name}: {', '.join(matches)} identificado(s).")
             elif item.analysis == "NO_DECISION":
                 lines.append(f"{name}: leitura indisponível ({html.escape(item.reason)}).")
+            elif any(
+                pattern.get("status") == PatternStatus.FORMING.value
+                for pattern in item.pattern_results
+            ):
+                lines.append(
+                    f"{name}: nenhum padrão confirmado; formação ou fechamento ainda não confirmado."
+                )
             else:
                 lines.append(f"{name}: nenhum padrão identificado.")
         if status is CycleStatus.PARTIAL:

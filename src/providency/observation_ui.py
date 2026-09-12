@@ -53,16 +53,13 @@ def render_observation_settings(
         balance = snapshot.get("balance")
         if balance:
             formatted_balance = (
-                f"{balance['amount']:,.2f} {balance['currency']}"
-                .replace(",", "_")
+                f"{balance['amount']:,.2f} {balance['currency']}".replace(",", "_")
                 .replace(".", ",")
                 .replace("_", ".")
             )
             st.metric("Saldo disponível na Vector", formatted_balance)
         legacy = st.columns(3)
-        legacy[0].number_input(
-            "Quantidade", value=float(fields.get("quantity", 0)), disabled=True
-        )
+        legacy[0].number_input("Quantidade", value=float(fields.get("quantity", 0)), disabled=True)
         desired = configuration.get("desired", {})
         legacy[1].number_input(
             "Risco/retorno mínimo", value=float(desired.get("min_rr") or 2), disabled=True
@@ -118,6 +115,18 @@ def render_observation_settings(
         ):
             st.caption(f"{item.get('name_en', '')} · família {item.get('family', '—')}")
             st.write(item.get("description") or "Sem descrição.")
+            illustration = item.get("illustration") or {}
+            if illustration.get("path"):
+                st.image(illustration["path"], caption=illustration.get("label"), width="stretch")
+            reference = item.get("reference_capture")
+            if reference:
+                st.image(
+                    reference["path"],
+                    caption=f"Captura real · {reference.get('symbol')} · {reference.get('timeframe')} · {reference.get('captured_at')}",
+                    width="stretch",
+                )
+            else:
+                st.caption("Nenhuma captura real deste padrão confirmado foi registrada ainda.")
             st.caption(
                 f"{item.get('illustration', {}).get('label', 'Ilustração didática')} · {item.get('quality', {}).get('observed_precision', 'Amostra insuficiente')}"
             )
@@ -131,8 +140,7 @@ def render_observation_settings(
             "destino": telegram_config.get("chat_id") or "Não identificado",
         }
     )
-    with st.expander("Configurar destino Telegram"):
-        render_telegram(telegram, action)
+    render_telegram(telegram, action)
 
 
 def render_observation_activities(

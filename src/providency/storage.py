@@ -751,6 +751,23 @@ class Storage:
                 result.append(item)
             return result
 
+    def observation_pattern_references(self) -> dict[tuple[str, str], dict[str, Any]]:
+        references: dict[tuple[str, str], dict[str, Any]] = {}
+        with self.connect() as connection:
+            rows = connection.execute(
+                "SELECT result_json FROM observation_results ORDER BY created_at DESC"
+            )
+            for row in rows:
+                result = json.loads(row[0])
+                capture = result.get("evidence") or {}
+                if result.get("analysis") != "USABLE" or not capture.get("path"):
+                    continue
+                for pattern in result.get("pattern_results", []):
+                    key = (pattern["pattern_id"], pattern["pattern_version"])
+                    if pattern["status"] == "MATCH" and key not in references:
+                        references[key] = capture
+        return references
+
     def create_observation_outbox(self, cycle_id: str, text: str) -> str:
         outbox_id = str(uuid4())
         with self.connect() as connection:

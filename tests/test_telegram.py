@@ -1,6 +1,8 @@
 import json
 import urllib.request
+from threading import get_ident
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -93,3 +95,57 @@ async def test_client_sends_only_message_and_opaque_callbacks(
     assert "secret-bot-token" not in json.dumps(captured["payload"])
     keyboard = captured["payload"]["reply_markup"]["inline_keyboard"]
     assert keyboard[0][0]["callback_data"] == "yes:opaque"
+
+
+@pytest.mark.asyncio
+async def test_discovery_uses_explicit_start_sender_without_consuming_callbacks() -> None:
+    client = TelegramClient(MemoryCredentials("test-only-token"))
+    message = {
+        "text": "/start@providency_bot",
+        "chat": {"id": -123, "title": "Group"},
+        "from": {"id": 456, "first_name": "Operator", "is_bot": False},
+    }
+    request = AsyncMock(
+        return_value={
+            "result": [
+                {"message": message},
+                {"message": message},
+                {"message": message | {"text": "unrelated"}},
+                {"message": message | {"sender_chat": {"id": -123}}},
+                {"message": message | {"from": {"id": 99, "is_bot": True}}},
+                {"callback_query": {"data": "yes:pending"}},
+            ]
+        }
+    )
+    client._request = request
+    assert await client.discover_destinations() == [
+        {"chat_id": -123, "user_id": 456, "chat_name": "Group", "user_name": "Operator"}
+    ]
+    assert "offset" not in request.call_args.args[1]
+
+
+@pytest.mark.asyncio
+async def test_credential_access_does_not_block_the_engine_event_loop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    event_loop_thread = get_ident()
+    credential_threads = []
+
+    class Credentials:
+        def get_password(self, service: str, username: str) -> str:
+            credential_threads.append(get_ident())
+            return "fixture-token"
+
+    class Response:
+        def __enter__(self) -> "Response":
+            return self
+
+        def __exit__(self, *_: object) -> None:
+            pass
+
+        def read(self) -> bytes:
+            return b'{"ok":true,"result":{"username":"fixture_bot"}}'
+
+    monkeypatch.setattr(urllib.request, "urlopen", lambda *a, **k: Response())
+    assert (await TelegramClient(Credentials()).health_check())["state"] == "READY"
+    assert credential_threads[0] != event_loop_thread
